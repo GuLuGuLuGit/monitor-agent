@@ -1,0 +1,28 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+agent
+
+# Go build/test
+*.test
+*.out
+/vendor/
+go.work
+go.work.sum
+
+# Config with secrets
+config/config.yaml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
