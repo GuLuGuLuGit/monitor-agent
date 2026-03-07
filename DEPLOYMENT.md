@@ -101,7 +101,7 @@ sudo chmod +x /usr/local/bin/monitor-agent
 # 创建配置文件
 sudo tee /usr/local/etc/monitor-agent/config.yaml > /dev/null <<'EOF'
 server:
-  url: "http://your-backend-server:8080"  # 修改为你的后端地址
+  url: "https://monitor.ikanban.cn"  # 生产环境后端地址
   timeout: 30
 
 device:
@@ -273,7 +273,7 @@ sudo vim /usr/local/etc/monitor-agent/config.yaml
 #### 后端服务器地址
 ```yaml
 server:
-  url: "http://your-backend-server:8080"  # 必须修改
+  url: "https://monitor.ikanban.cn"  # 生产环境后端地址
   timeout: 30
 ```
 
@@ -331,7 +331,7 @@ tail -f ~/.monitor-agent/stderr.log
 cat /usr/local/etc/monitor-agent/config.yaml
 
 # 测试网络连接
-curl http://your-backend-server:8080/health
+curl https://monitor.ikanban.cn/health
 
 # 手动运行查看错误
 /usr/local/bin/monitor-agent -config=/usr/local/etc/monitor-agent/config.yaml
@@ -347,7 +347,7 @@ curl http://your-backend-server:8080/health
 grep "register" ~/.monitor-agent/agent.log
 
 # 检查后端服务是否正常
-curl -X POST http://your-backend-server:8080/api/agent/device/register \
+curl -X POST https://monitor.ikanban.cn/api/agent/device/register \
   -H "Content-Type: application/json" \
   -d '{"device_id":"test","hostname":"test","mac_address":"00:00:00:00:00:00"}'
 ```
@@ -441,10 +441,16 @@ rm -rf ~/.monitor-agent
 
 ### 1. 使用 HTTPS
 
-修改配置文件中的后端yaml
+生产环境已配置 HTTPS，修改配置文件中的后端地址：
+```yaml
 server:
-  url: "https://your-backend-server:443"
+  url: "https://monitor.ikanban.cn"
 ```
+
+**注意**：
+- HTTPS 证书由 Let's Encrypt 提供，自动续期
+- 证书有效期 90 天，系统会自动续期
+- 如遇证书问题，检查服务器 Certbot 配置
 
 ### 2. 自定义数据目录
 
