@@ -82,16 +82,26 @@ func Collect(deviceID string) (*Info, error) {
 		info.MemoryTotal = int64(memInfo.Total)
 	}
 
-	// 磁盘（根分区或第一块）
+	// 磁盘：优先根分区 "/"，否则取第一个可用分区
 	parts, err := disk.Partitions(false)
 	if err == nil {
+		var firstTotal int64
 		for _, p := range parts {
 			usage, err := disk.Usage(p.Mountpoint)
 			if err != nil {
 				continue
 			}
-			info.DiskTotal = int64(usage.Total)
-			break
+			total := int64(usage.Total)
+			if firstTotal == 0 {
+				firstTotal = total
+			}
+			if p.Mountpoint == "/" {
+				info.DiskTotal = total
+				break
+			}
+		}
+		if info.DiskTotal == 0 && firstTotal > 0 {
+			info.DiskTotal = firstTotal
 		}
 	}
 

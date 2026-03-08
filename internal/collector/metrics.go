@@ -49,18 +49,32 @@ func Collect() (*MetricItem, error) {
 		m.MemoryAvailable = int64(memInfo.Available)
 	}
 
-	// 磁盘（根或第一个分区）
+	// 磁盘：优先根分区 "/"，否则取第一个可用分区
 	parts, err := disk.Partitions(false)
 	if err == nil {
+		var rootUsage *disk.UsageStat
+		var firstUsage *disk.UsageStat
 		for _, p := range parts {
 			usage, err := disk.Usage(p.Mountpoint)
 			if err != nil {
 				continue
 			}
-			m.DiskUsage = usage.UsedPercent
-			m.DiskUsed = int64(usage.Used)
-			m.DiskAvailable = int64(usage.Free)
-			break
+			if p.Mountpoint == "/" {
+				rootUsage = usage
+				break
+			}
+			if firstUsage == nil {
+				firstUsage = usage
+			}
+		}
+		if rootUsage != nil {
+			m.DiskUsage = rootUsage.UsedPercent
+			m.DiskUsed = int64(rootUsage.Used)
+			m.DiskAvailable = int64(rootUsage.Free)
+		} else if firstUsage != nil {
+			m.DiskUsage = firstUsage.UsedPercent
+			m.DiskUsed = int64(firstUsage.Used)
+			m.DiskAvailable = int64(firstUsage.Free)
 		}
 	}
 
