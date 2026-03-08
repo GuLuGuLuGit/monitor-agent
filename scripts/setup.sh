@@ -237,7 +237,7 @@ cat > "$LAUNCHD_PLIST" << PLIST
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>${INSTALL_DIR}:/usr/local/bin:/usr/bin:/bin</string>
+        <string>${INSTALL_DIR}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
 </dict>
 </plist>
