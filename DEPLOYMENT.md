@@ -3,7 +3,7 @@
 ## 📋 目录
 
 1. [系统要求](#系统要求)
-2. [快速部署](#快速部署)
+2. [一键部署（推荐）](#一键部署推荐)
 3. [手动部署](#手动部署)
 4. [服务管理](#服务管理)
 5. [配置说明](#配置说明)
@@ -16,49 +16,47 @@
 
 - **操作系统**: macOS 10.15 (Catalina) 或更高版本
 - **架构**: Intel (x86_64) 或 Apple Silicon (arm64)
+- **Go 编译环境**: Go 1.21+（脚本会自动编译）
 - **磁盘空间**: 至少 100MB
 - **内存**: 至少 50MB
 - **网络**: 能够访问后端服务器
 
 ---
 
-## 快速部署
+## 一键部署（推荐）
 
-### 1. 编译 Agent
+只需一条命令，脚本会引导你完成全部部署流程。
+
+### 运行
 
 ```bash
 cd monitor-agent
-
-# Intel Mac
-make build-darwin
-# 生成: agent-darwin-amd64
-
-# Apple Silicon Mac (M1/M2/M3)
-GOOS=darwin GOARCH=arm64 go build -o agent-darwin-arm64 ./cmd/agent
-
-# 或者直接编译当前架构
-make build
+chmod +x scripts/setup.sh
+./scripts/setup.sh
 ```
 
-### 2. 运行安装脚本
+### 交互过程
 
-```bash
-# 给安装脚本执行权限
-chmod +x scripts/install.sh
+脚本启动后会要求你 **手动输入** 以下信息：
 
-# 运行安装
-./scripts/install.sh
-```
+| 提示 | 说明 | 示例 |
+|------|------|------|
+| 后端 API 地址 | **必填**，你的 Monitor Server 地址 | `https://monitor.ikanban.cn` 或 `http://1.2.3.4:8010` |
+| Redis 地址 | 可选，用于远程命令功能，直接回车使用默认值 `localhost:6379` | `192.168.1.100:6379` |
+| Redis 密码 | 可选，无密码直接回车 | |
 
-安装脚本会：
-- ✅ 检查系统环境
-- ✅ 安装二进制文件到 `/usr/local/bin`
-- ✅ 创建配置文件
-- ✅ 设置数据目录
-- ✅ 创建 LaunchAgent（开机自启）
-- ✅ 询问是否立即启动服务
+> **重要**：后端 API 地址是必填项，请确保地址可以从当前机器访问到。
 
-### 3. 验证安装
+### 脚本自动完成
+
+- ✅ 编译 Agent（自动检测当前系统架构）
+- ✅ 安装二进制文件到 `/usr/local/bin/monitor-agent`
+- ✅ 根据输入生成配置文件到 `/usr/local/etc/monitor-agent/config.yaml`
+- ✅ 创建数据目录 `~/.monitor-agent/`
+- ✅ 配置 macOS LaunchAgent（开机自启 + 崩溃自动重启）
+- ✅ 启动服务并验证
+
+### 验证
 
 ```bash
 # 检查服务状态
@@ -67,7 +65,7 @@ launchctl list | grep com.monitor.agent
 # 查看日志
 tail -f ~/.monitor-agent/agent.log
 
-# 测试命令
+# 手动前台运行（调试用）
 monitor-agent -config=/usr/local/etc/monitor-agent/config.yaml
 ```
 
