@@ -11,14 +11,21 @@ import (
 
 // Config 应用配置
 type Config struct {
-	Server   ServerConfig   `mapstructure:"server"`
-	Device   DeviceConfig   `mapstructure:"device"`
+	Server    ServerConfig    `mapstructure:"server"`
+	Device    DeviceConfig    `mapstructure:"device"`
+	Redis     RedisConfig     `mapstructure:"redis"`
 	Intervals IntervalsConfig `mapstructure:"intervals"`
-	Metrics  MetricsConfig  `mapstructure:"metrics"`
-	Skills   SkillsConfig   `mapstructure:"skills"`
-	Logs     LogsConfig     `mapstructure:"logs"`
-	Cache    CacheConfig   `mapstructure:"cache"`
-	Retry    RetryConfig   `mapstructure:"retry"`
+	Metrics   MetricsConfig   `mapstructure:"metrics"`
+	Skills    SkillsConfig    `mapstructure:"skills"`
+	Logs      LogsConfig      `mapstructure:"logs"`
+	Cache     CacheConfig     `mapstructure:"cache"`
+	Retry     RetryConfig     `mapstructure:"retry"`
+}
+
+type RedisConfig struct {
+	Addr     string `mapstructure:"addr"`
+	Password string `mapstructure:"password"`
+	DB       int    `mapstructure:"db"`
 }
 
 type ServerConfig struct {
@@ -104,6 +111,9 @@ func Load(configPath string) (*Config, error) {
 func (c *Config) applyDefaults() error {
 	if c.Server.URL == "" {
 		c.Server.URL = "http://localhost:8080"
+	}
+	if c.Redis.Addr == "" {
+		c.Redis.Addr = "localhost:6379"
 	}
 	if c.Server.Timeout <= 0 {
 		c.Server.Timeout = 30

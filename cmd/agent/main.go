@@ -10,9 +10,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"monitor-agent/internal/cache"
-	"monitor-agent/internal/config"
+	"monitor-agent/internal/command"
 	"monitor-agent/internal/collector"
+	"monitor-agent/internal/config"
 	"monitor-agent/internal/device"
 	"monitor-agent/internal/uploader"
 	"monitor-agent/pkg/client"
@@ -79,6 +81,19 @@ func main() {
 		logger.Info("device registered", "device_id", deviceID)
 	}
 	cli.SetAPIKey(apiKey)
+
+	// Redis 连接与命令消费
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     cfg.Redis.Addr,
+		Password: cfg.Redis.Password,
+		DB:       cfg.Redis.DB,
+	})
+	if err := rdb.Ping(context.Background()).Err(); err != nil {
+		logger.Warn("redis connection failed, command consumer disabled", "err", err)
+		rdb = nil
+	} else {
+		logger.Info("redis connected", "addr", cfg.Redis.Addr)
+	}
 
 	// 离线缓存（可选）
 	var c *cache.Cache
@@ -304,6 +319,21 @@ func main() {
 		}
 	}()
 
+	// 命令消费（需要 Redis）
+	if rdb != nil {
+		wg.Add(1)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Error("command consumer goroutine panic", "recover", r)
+				}
+			}()
+			defer wg.Done()
+			consumer := command.NewConsumer(rdb, deviceID, cli)
+			consumer.Run(ctx)
+		}()
+	}
+
 	// 优雅退出
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -311,5 +341,8 @@ func main() {
 	logger.Info("shutting down")
 	cancel()
 	wg.Wait()
+	if rdb != nil {
+		_ = rdb.Close()
+	}
 	logger.Info("exit")
 }

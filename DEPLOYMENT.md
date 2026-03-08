@@ -347,7 +347,7 @@ curl https://monitor.ikanban.cn/health
 grep "register" ~/.monitor-agent/agent.log
 
 # 检查后端服务是否正常
-curl -X POST https://monitor.ikanban.cn/api/agent/device/register \
+curl -X POST https://monitor.ikanban.cn/api/v1/agent/devices/register \
   -H "Content-Type: application/json" \
   -d '{"device_id":"test","hostname":"test","mac_address":"00:00:00:00:00:00"}'
 ```

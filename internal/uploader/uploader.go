@@ -10,12 +10,12 @@ import (
 )
 
 const (
-	apiPrefix       = "/api/agent"
-	registerPath    = apiPrefix + "/device/register"
-	heartbeatPath   = apiPrefix + "/device/heartbeat"
-	metricsPath     = apiPrefix + "/metrics/upload"
-	skillsPath      = apiPrefix + "/skills/upload"
-	logsPath        = apiPrefix + "/logs/upload"
+	apiPrefix     = "/api/v1/agent"
+	registerPath  = apiPrefix + "/devices/register"
+	heartbeatPath = apiPrefix + "/devices/heartbeat"
+	metricsPath   = apiPrefix + "/metrics"
+	skillsPath    = apiPrefix + "/skills"
+	logsPath      = apiPrefix + "/logs"
 )
 
 // Uploader 上报器：注册、心跳、指标、Skills、日志

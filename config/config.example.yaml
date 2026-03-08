@@ -6,6 +6,11 @@ device:
   id_file: ""
   api_key_file: ""
 
+redis:
+  addr: "localhost:6379"
+  password: ""
+  db: 0
+
 intervals:
   heartbeat: 60
   metrics: 30
