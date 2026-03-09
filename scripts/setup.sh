@@ -183,6 +183,7 @@ metrics:
 
 skills:
   scan_paths:
+    - "~/.openclaw/skills"
     - "~/Library/Application Support/OpenClaw/skills"
     - "/usr/local/openclaw/skills"
 

@@ -42,11 +42,12 @@ func (u *Uploader) Register(info *device.Info) (*device.RegisterResponse, error)
 	return &resp, nil
 }
 
-// Heartbeat 心跳
-func (u *Uploader) Heartbeat(agentVersion string, status int8) (*device.HeartbeatResponse, error) {
+// Heartbeat 心跳；extraData 为可选的 JSON 扩展数据
+func (u *Uploader) Heartbeat(agentVersion string, status int8, extraData *string) (*device.HeartbeatResponse, error) {
 	req := device.HeartbeatRequest{
 		AgentVersion: agentVersion,
 		Status:       status,
+		ExtraData:    extraData,
 	}
 	var resp device.HeartbeatResponse
 	if err := u.client.Post(heartbeatPath, req, &resp); err != nil {

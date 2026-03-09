@@ -186,7 +186,7 @@ func main() {
 		}()
 	}
 
-	// 心跳
+	// 心跳（每 5 次心跳携带 openclaw 扩展数据）
 	wg.Add(1)
 	go func() {
 		defer func() {
@@ -197,12 +197,24 @@ func main() {
 		defer wg.Done()
 		ticker := time.NewTicker(time.Duration(cfg.Intervals.Heartbeat) * time.Second)
 		defer ticker.Stop()
+		heartbeatCount := 0
+		const openclawInterval = 5
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				_, err := up.Heartbeat(device.AgentVersion, 1)
+				heartbeatCount++
+				var extraData *string
+				if heartbeatCount%openclawInterval == 1 {
+					if info, err := collector.CollectOpenClawInfo(); err == nil {
+						if b, err := json.Marshal(info); err == nil {
+							s := string(b)
+							extraData = &s
+						}
+					}
+				}
+				_, err := up.Heartbeat(device.AgentVersion, 1, extraData)
 				if err != nil {
 					logger.Warn("heartbeat failed", "err", err)
 					if c != nil {

@@ -22,8 +22,9 @@ type RegisterResponse struct {
 
 // HeartbeatRequest 与后端 DeviceHeartbeatRequest 一致
 type HeartbeatRequest struct {
-	AgentVersion string `json:"agent_version"`
-	Status       int8   `json:"status"`
+	AgentVersion string  `json:"agent_version"`
+	Status       int8    `json:"status"`
+	ExtraData    *string `json:"extra_data,omitempty"`
 }
 
 // HeartbeatResponse 与后端 DeviceHeartbeatResponse 一致
