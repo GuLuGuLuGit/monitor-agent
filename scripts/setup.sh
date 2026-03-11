@@ -120,15 +120,19 @@ if [ "$KEEP_CONFIG" = false ]; then
   SERVER_URL="${SERVER_URL%/}"
   log "后端地址: ${SERVER_URL}"
 
-  step "配置 Redis 地址（命令功能需要）"
-  echo -e "请输入 Redis 地址（默认: ${BOLD}localhost:6379${NC}，直接回车使用默认值）"
-  read -p "> " REDIS_ADDR
-  REDIS_ADDR="${REDIS_ADDR:-localhost:6379}"
-  log "Redis 地址: ${REDIS_ADDR}"
-
-  echo ""
-  read -p "Redis 密码（无密码直接回车）> " REDIS_PASSWORD
-  REDIS_PASSWORD="${REDIS_PASSWORD:-}"
+  step "配置 MQTT Broker 地址（命令通道）"
+  # 从后端地址自动推导默认 MQTT 地址
+  MQTT_DEFAULT=""
+  SERVER_HOST=$(echo "$SERVER_URL" | sed -E 's|https?://||' | sed 's|:[0-9]*$||' | sed 's|/.*||')
+  if [ -n "$SERVER_HOST" ] && [ "$SERVER_HOST" != "localhost" ]; then
+    MQTT_DEFAULT="tcp://${SERVER_HOST}:1883"
+  else
+    MQTT_DEFAULT="tcp://localhost:1883"
+  fi
+  echo -e "请输入 MQTT Broker 地址（默认: ${BOLD}${MQTT_DEFAULT}${NC}，直接回车使用默认值）"
+  read -p "> " MQTT_BROKER
+  MQTT_BROKER="${MQTT_BROKER:-$MQTT_DEFAULT}"
+  log "MQTT 地址: ${MQTT_BROKER}"
 fi
 
 # 2. 检测项目目录
@@ -167,10 +171,14 @@ server:
   url: "${SERVER_URL}"
   timeout: 30
 
-redis:
-  addr: "${REDIS_ADDR}"
-  password: "${REDIS_PASSWORD}"
-  db: 0
+transport:
+  type: mqtt
+  mqtt:
+    broker: "${MQTT_BROKER}"
+    keep_alive: 60
+    clean_session: false
+    auto_reconnect: true
+    reconnect_interval: 5
 
 intervals:
   heartbeat: 60
