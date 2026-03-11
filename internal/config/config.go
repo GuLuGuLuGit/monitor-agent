@@ -13,6 +13,7 @@ import (
 type Config struct {
 	Server    ServerConfig    `mapstructure:"server"`
 	Device    DeviceConfig    `mapstructure:"device"`
+	Transport TransportConfig `mapstructure:"transport"`
 	Redis     RedisConfig     `mapstructure:"redis"`
 	Intervals IntervalsConfig `mapstructure:"intervals"`
 	Metrics   MetricsConfig   `mapstructure:"metrics"`
@@ -20,6 +21,24 @@ type Config struct {
 	Logs      LogsConfig      `mapstructure:"logs"`
 	Cache     CacheConfig     `mapstructure:"cache"`
 	Retry     RetryConfig     `mapstructure:"retry"`
+}
+
+// TransportConfig selects which command broker to use.
+// "redis" (default, legacy) or "mqtt" (future).
+type TransportConfig struct {
+	Type string     `mapstructure:"type"`
+	MQTT MQTTConfig `mapstructure:"mqtt"`
+}
+
+type MQTTConfig struct {
+	Broker            string `mapstructure:"broker"`
+	KeepAlive         int    `mapstructure:"keep_alive"`
+	CleanSession      bool   `mapstructure:"clean_session"`
+	AutoReconnect     bool   `mapstructure:"auto_reconnect"`
+	ReconnectInterval int    `mapstructure:"reconnect_interval"`
+	Username          string `mapstructure:"username"`
+	Password          string `mapstructure:"password"`
+	UseTLS            bool   `mapstructure:"use_tls"`
 }
 
 type RedisConfig struct {
@@ -36,6 +55,7 @@ type ServerConfig struct {
 type DeviceConfig struct {
 	IDFile     string `mapstructure:"id_file"`
 	APIKeyFile string `mapstructure:"api_key_file"`
+	DataDir    string `mapstructure:"data_dir"`
 }
 
 type IntervalsConfig struct {
@@ -112,12 +132,24 @@ func (c *Config) applyDefaults() error {
 	if c.Server.URL == "" {
 		c.Server.URL = "http://localhost:8080"
 	}
-	if c.Redis.Addr == "" {
-		c.Redis.Addr = "localhost:6379"
-	}
 	if c.Server.Timeout <= 0 {
 		c.Server.Timeout = 30
 	}
+
+	// Transport defaults
+	if c.Transport.Type == "" {
+		c.Transport.Type = "mqtt"
+	}
+	if c.Transport.Type == "redis" && c.Redis.Addr == "" {
+		c.Redis.Addr = "localhost:6379"
+	}
+	if c.Transport.MQTT.KeepAlive <= 0 {
+		c.Transport.MQTT.KeepAlive = 60
+	}
+	if c.Transport.MQTT.ReconnectInterval <= 0 {
+		c.Transport.MQTT.ReconnectInterval = 5
+	}
+
 	if c.Intervals.Heartbeat <= 0 {
 		c.Intervals.Heartbeat = 60
 	}
@@ -161,23 +193,26 @@ func (c *Config) applyDefaults() error {
 		c.Cache.MaxSizeMB = 50
 	}
 
-	// 默认设备/缓存/日志路径：用户目录下
+	// ~/.openclaw/ as the canonical data directory
 	home, _ := os.UserHomeDir()
 	if home == "" {
 		home = "."
 	}
-	agentDir := filepath.Join(home, ".monitor-agent")
+	dataDir := filepath.Join(home, ".openclaw")
+	if c.Device.DataDir == "" {
+		c.Device.DataDir = dataDir
+	}
 	if c.Device.IDFile == "" {
-		c.Device.IDFile = filepath.Join(agentDir, "device_id")
+		c.Device.IDFile = filepath.Join(c.Device.DataDir, "device_id")
 	}
 	if c.Device.APIKeyFile == "" {
-		c.Device.APIKeyFile = filepath.Join(agentDir, "api_key")
+		c.Device.APIKeyFile = filepath.Join(c.Device.DataDir, "api_key")
 	}
 	if c.Cache.Dir == "" {
-		c.Cache.Dir = filepath.Join(agentDir, "cache")
+		c.Cache.Dir = filepath.Join(c.Device.DataDir, "cache")
 	}
 	if c.Logs.File == "" {
-		c.Logs.File = filepath.Join(agentDir, "agent.log")
+		c.Logs.File = filepath.Join(c.Device.DataDir, "logs", "agent.log")
 	}
 
 	// 展开 skills 路径中的 ~

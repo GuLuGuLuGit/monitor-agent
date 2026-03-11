@@ -84,7 +84,28 @@ func CollectOpenClawInfo() (*OpenClawInfo, error) {
 		return nil, err
 	}
 	out := stdout.String()
+	stderrStr := stderr.String()
+	// 若 stdout 过短，可能主要内容在 stderr（不少 CLI 将表格输出到 stderr），合并后解析
+	if len(stderrStr) > 0 {
+		if len(out) > 0 {
+			out = out + "\n" + stderrStr
+		} else {
+			out = stderrStr
+		}
+	}
+	// 统一换行并去掉行尾 \r，避免 section 标题匹配失败
+	out = strings.ReplaceAll(out, "\r\n", "\n")
+	out = strings.ReplaceAll(out, "\r", "\n")
+	// 非 TTY 下 CLI 仍可能输出 ANSI 颜色码，导致 "Overview" 等标题匹配失败，先剥掉
+	out = stripANSI(out)
 	return parseOpenClawStatusAll(out)
+}
+
+// stripANSI 去掉 ANSI 转义序列（如 \x1b[32m），便于按纯文本匹配 section 标题
+func stripANSI(s string) string {
+	// CSI: ESC [ 后跟参数和结尾字母；常见 \x1b[0m \x1b[36m 等
+	ansiCSI := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	return ansiCSI.ReplaceAllString(s, "")
 }
 
 // parseOpenClawStatusAll 解析 openclaw status --all 的完整输出
@@ -96,8 +117,10 @@ func parseOpenClawStatusAll(out string) (*OpenClawInfo, error) {
 	}
 	lines := strings.Split(out, "\n")
 
-	// Overview 表：Item | Value
+	// Overview 表：Item | Value（部分 CLI 用 "Status" 作为标题）
 	if overview := parseOverviewTable(lines, "Overview"); overview != nil {
+		info.Overview = overview
+	} else if overview := parseOverviewTable(lines, "Status"); overview != nil {
 		info.Overview = overview
 	}
 
@@ -187,19 +210,21 @@ func parseKeyValueTable(lines []string, sectionTitle string) []map[string]string
 			break
 		}
 		cols := splitTableRow(line)
-		// 表格格式为 │ Item │ Value │，split 后 cols[0] 常为空，cols[1]=Item, cols[2]=Value
+		// 表格格式为 │ Item │ Value │，split 后 cols[0] 常为空，cols[1]=Item, cols[2]=Value（Value 中可能含 │，需拼接）
 		if len(cols) >= 3 {
 			key := strings.TrimSpace(cols[1])
-			val := strings.TrimSpace(cols[2])
-			if key != "" && key != "Item" {
-				merged[key] = val
+			if key == "" || key == "Item" || key == "Key" {
+				continue
 			}
+			val := strings.TrimSpace(strings.Join(cols[2:], tableColumnSep))
+			merged[key] = val
 		} else if len(cols) >= 2 {
 			key := strings.TrimSpace(cols[0])
-			val := strings.TrimSpace(cols[1])
-			if key != "" && key != "Item" {
-				merged[key] = val
+			if key == "" || key == "Item" || key == "Key" {
+				continue
 			}
+			val := strings.TrimSpace(cols[1])
+			merged[key] = val
 		}
 	}
 	if len(merged) > 0 {
@@ -337,7 +362,8 @@ func parseTableWithHeaderAt(lines []string, start int, headers []string) []map[s
 
 func parseDiagnosis(lines []string) *OpenClawDiagnosis {
 	d := &OpenClawDiagnosis{}
-	skillsRe := regexp.MustCompile(`Skills:\s*(\d+)\s*eligible\s*·\s*(\d+)\s*missing`)
+	// 兼容 "✓ Skills: 18 eligible · 0 missing · /path" 及不同 Unicode 中点
+	skillsRe := regexp.MustCompile(`(?i)Skills:\s*(\d+)\s*eligible\s*.*?(\d+)\s*missing`)
 	issuesRe := regexp.MustCompile(`(?:✓|!)\s*Channel issues:\s*(.+)`)
 	for _, line := range lines {
 		if m := skillsRe.FindStringSubmatch(line); len(m) >= 3 {
@@ -370,16 +396,39 @@ func parseAgentIDAndName(s string) (id, name string) {
 }
 
 func findSectionStart(lines []string, title string) int {
+	title = strings.TrimSpace(title)
+	titleLower := strings.ToLower(title)
 	for i, line := range lines {
-		if strings.TrimSpace(line) == title {
+		t := strings.TrimSpace(line)
+		if t == title || strings.ToLower(t) == titleLower {
 			return i
+		}
+		// 兼容标题后带冒号或空格
+		if len(title) > 0 && len(t) >= len(title) && strings.ToLower(t[:len(title)]) == titleLower {
+			rest := t[len(title):]
+			if rest == "" || rest == " " || rest == ":" || strings.HasPrefix(rest, " ") || strings.HasPrefix(rest, ":") {
+				return i
+			}
 		}
 	}
 	return -1
 }
 
 func isTableSeparator(line string) bool {
-	return strings.Contains(line, "─") || strings.Contains(line, "├") || strings.Contains(line, "┼") || strings.Contains(line, "└") || strings.Contains(line, "┌") || strings.Contains(line, "┐")
+	if strings.Contains(line, "─") || strings.Contains(line, "├") || strings.Contains(line, "┼") || strings.Contains(line, "└") || strings.Contains(line, "┌") || strings.Contains(line, "┐") {
+		return true
+	}
+	// 非 TTY 时常用 ASCII：仅含 - + | 空格的整行为分隔行
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+	for _, r := range trimmed {
+		if r != '-' && r != '+' && r != '|' && r != ' ' {
+			return false
+		}
+	}
+	return strings.Contains(trimmed, "-") || strings.Contains(trimmed, "|")
 }
 
 func isNextSection(line string) bool {
@@ -397,8 +446,13 @@ func isNextSection(line string) bool {
 	return false
 }
 
+// splitTableRow 按表格列分割：非 TTY 时 CLI 常输出 ASCII "|"，TTY 为 Unicode "│"
 func splitTableRow(line string) []string {
-	parts := strings.Split(line, tableColumnSep)
+	sep := tableColumnSep
+	if !strings.Contains(line, "│") && strings.Contains(line, "|") {
+		sep = "|"
+	}
+	parts := strings.Split(line, sep)
 	for i := range parts {
 		parts[i] = strings.TrimSpace(parts[i])
 	}

@@ -3,9 +3,22 @@ server:
   timeout: 30
 
 device:
+  # data_dir defaults to ~/.openclaw/
+  data_dir: ""
   id_file: ""
   api_key_file: ""
 
+# Command transport: "mqtt" (recommended) or "redis" (legacy fallback)
+transport:
+  type: mqtt
+  mqtt:
+    broker: "tcp://your-server:1883"
+    keep_alive: 60
+    clean_session: false
+    auto_reconnect: true
+    reconnect_interval: 5
+
+# Redis (only needed if transport.type = redis)
 redis:
   addr: "localhost:6379"
   password: ""

@@ -2,130 +2,141 @@ package command
 
 import (
 	"context"
+	"crypto/rsa"
 	"encoding/json"
 	"fmt"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-	"monitor-agent/pkg/client"
+	"monitor-agent/internal/transport"
+	"monitor-agent/pkg/crypto"
 	"monitor-agent/pkg/logger"
 )
 
-const (
-	commandResultPath = "/api/v1/agent/commands/result"
-)
-
-// Consumer 从 Redis 队列消费并执行命令
+// Consumer receives and executes commands from any CommandBroker implementation.
 type Consumer struct {
-	rdb      *redis.Client
-	deviceID string
-	http     *client.Client
+	broker     transport.CommandBroker
+	deviceID   string
+	reporter   transport.ResultReporter
+	acker      transport.Acknowledger
+	progress   transport.ProgressReporter
+	privateKey *rsa.PrivateKey
 }
 
-// NewConsumer 创建命令消费者
-func NewConsumer(rdb *redis.Client, deviceID string, httpClient *client.Client) *Consumer {
+// NewConsumer creates a new Consumer backed by the given broker and result reporter.
+// privateKey is used for decrypting E2E encrypted commands (may be nil to skip decryption).
+// acker is optional; if provided, an ACK is sent on command receipt.
+// progress is optional; if provided, progress updates are published during execution.
+func NewConsumer(broker transport.CommandBroker, deviceID string, reporter transport.ResultReporter, privateKey *rsa.PrivateKey, acker transport.Acknowledger, progress transport.ProgressReporter) *Consumer {
 	return &Consumer{
-		rdb:      rdb,
-		deviceID: deviceID,
-		http:     httpClient,
+		broker:     broker,
+		deviceID:   deviceID,
+		reporter:   reporter,
+		acker:      acker,
+		progress:   progress,
+		privateKey: privateKey,
 	}
 }
 
-// Run 阻塞运行命令消费循环，直到 ctx 取消
+// Run blocks and processes commands until ctx is cancelled.
 func (c *Consumer) Run(ctx context.Context) {
-	queueKey := fmt.Sprintf("agent:commands:%s", c.deviceID)
-	logger.Info("command consumer started", "queue", queueKey)
-
-	for {
-		select {
-		case <-ctx.Done():
-			logger.Info("command consumer stopped")
-			return
-		default:
-		}
-
-		// BLPOP 最多等 5 秒，避免长时间阻塞导致无法响应 ctx 取消
-		result, err := c.rdb.BLPop(ctx, 5*time.Second, queueKey).Result()
-		if err != nil {
-			if err == redis.Nil || err == context.Canceled || err == context.DeadlineExceeded {
-				continue
-			}
-			logger.Warn("blpop error", "err", err)
-			time.Sleep(2 * time.Second)
-			continue
-		}
-
-		if len(result) < 2 {
-			continue
-		}
-		commandID := result[1]
-		logger.Info("received command", "command_id", commandID)
-
-		go c.processCommand(ctx, commandID)
-	}
+	c.broker.Run(ctx, c.deviceID, c.handleCommand)
 }
 
-func (c *Consumer) processCommand(ctx context.Context, commandID string) {
+func (c *Consumer) handleCommand(ctx context.Context, cmd *transport.Command) {
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Error("command execution panic", "command_id", commandID, "recover", r)
-			c.reportResult(commandID, 3, "", fmt.Sprintf("panic: %v", r))
+			logger.Error("command execution panic", "command_id", cmd.ID, "recover", r)
+			c.reportResult(cmd.ID, 3, "", fmt.Sprintf("panic: %v", r))
 		}
 	}()
 
-	// 从 Redis 获取命令详情
-	cmdKey := fmt.Sprintf("agent:command:%s", commandID)
-	data, err := c.rdb.HGetAll(ctx, cmdKey).Result()
-	if err != nil || len(data) == 0 {
-		logger.Error("get command detail failed", "command_id", commandID, "err", err)
-		c.reportResult(commandID, 3, "", "failed to get command detail from redis")
-		return
+	if c.acker != nil {
+		if err := c.acker.PublishAck(cmd.ID); err != nil {
+			logger.Warn("send ACK failed", "command_id", cmd.ID, "err", err)
+		}
 	}
 
-	commandType := data["command_type"]
-	paramsStr := data["command_params"]
+	cmdType := cmd.Type
+	cmdParams := cmd.Params
 
-	var params map[string]interface{}
-	if paramsStr != "" && paramsStr != "map[]" {
-		_ = json.Unmarshal([]byte(paramsStr), &params)
+	if cmd.IsEncrypted && cmd.EncryptedPayload != "" {
+		if c.privateKey == nil {
+			logger.Error("encrypted command received but no private key", "command_id", cmd.ID)
+			c.reportResult(cmd.ID, 3, "", "no private key for decryption")
+			return
+		}
+
+		var envelope crypto.Envelope
+		if err := json.Unmarshal([]byte(cmd.EncryptedPayload), &envelope); err != nil {
+			logger.Error("parse encrypted envelope", "command_id", cmd.ID, "err", err)
+			c.reportResult(cmd.ID, 3, "", fmt.Sprintf("parse envelope: %v", err))
+			return
+		}
+
+		plaintext, err := crypto.Open(c.privateKey, &envelope)
+		if err != nil {
+			logger.Error("decrypt command", "command_id", cmd.ID, "err", err)
+			c.reportResult(cmd.ID, 3, "", fmt.Sprintf("decrypt: %v", err))
+			return
+		}
+
+		var decrypted struct {
+			CommandType   string                 `json:"command_type"`
+			CommandParams map[string]interface{} `json:"command_params"`
+		}
+		if err := json.Unmarshal(plaintext, &decrypted); err != nil {
+			logger.Error("unmarshal decrypted command", "command_id", cmd.ID, "err", err)
+			c.reportResult(cmd.ID, 3, "", fmt.Sprintf("unmarshal decrypted: %v", err))
+			return
+		}
+
+		cmdType = decrypted.CommandType
+		cmdParams = decrypted.CommandParams
+		logger.Info("command decrypted", "command_id", cmd.ID, "type", cmdType)
 	}
 
-	// 更新状态为执行中
-	c.reportResult(commandID, 1, "", "")
+	c.reportResult(cmd.ID, 1, "", "")
+	c.sendProgress(cmd.ID, "running", 0, "开始执行", 1, 0)
 
-	// 执行命令
-	result := Execute(commandType, params)
+	result := Execute(cmdType, cmdParams)
 
-	// 上报结果
-	c.reportResult(commandID, result.Status, result.Output, result.ErrorMessage)
+	finalStatus := "completed"
+	if result.Status == 3 {
+		finalStatus = "failed"
+	}
+	c.sendProgress(cmd.ID, finalStatus, 100, "执行完成", 1, 1)
+	c.reportResult(cmd.ID, result.Status, result.Output, result.ErrorMessage)
 }
 
-func (c *Consumer) reportResult(commandIDStr string, status int8, output, errMsg string) {
-	// 跳过"执行中"状态以外的日志，"执行中"是正常流转
-	if status != 1 {
-		logger.Info("reporting command result", "command_id", commandIDStr, "status", status)
-	}
-
-	var id int64
-	fmt.Sscanf(commandIDStr, "%d", &id)
-	if id == 0 {
-		logger.Error("invalid command id", "raw", commandIDStr)
+func (c *Consumer) sendProgress(commandID string, status string, progress int, step string, totalSteps int, completedSteps int) {
+	if c.progress == nil {
 		return
 	}
+	var id int64
+	fmt.Sscanf(commandID, "%d", &id)
+	if id == 0 {
+		return
+	}
+	report := &transport.ProgressReport{
+		CommandID:      id,
+		Status:         status,
+		Progress:       progress,
+		CurrentStep:    step,
+		TotalSteps:     totalSteps,
+		CompletedSteps: completedSteps,
+		Timestamp:      time.Now().Unix(),
+	}
+	if err := c.progress.PublishProgress(report); err != nil {
+		logger.Warn("publish progress failed", "command_id", commandID, "err", err)
+	}
+}
 
-	req := struct {
-		ID           int64  `json:"id"`
-		Status       int8   `json:"status"`
-		Result       string `json:"result"`
-		ErrorMessage string `json:"error_message"`
-	}{
-		ID:           id,
-		Status:       status,
-		Result:       output,
-		ErrorMessage: errMsg,
+func (c *Consumer) reportResult(commandID string, status int8, output, errMsg string) {
+	if status != 1 {
+		logger.Info("reporting command result", "command_id", commandID, "status", status)
 	}
 
-	if err := c.http.Post(commandResultPath, req, nil); err != nil {
-		logger.Warn("report command result failed", "command_id", commandIDStr, "err", err)
+	if err := c.reporter.ReportResult(commandID, status, output, errMsg); err != nil {
+		logger.Warn("report command result failed", "command_id", commandID, "err", err)
 	}
 }

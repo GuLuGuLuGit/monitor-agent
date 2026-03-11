@@ -4,18 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/redis/go-redis/v9"
+	goredis "github.com/redis/go-redis/v9"
 	"monitor-agent/internal/cache"
 	"monitor-agent/internal/command"
 	"monitor-agent/internal/collector"
 	"monitor-agent/internal/config"
 	"monitor-agent/internal/device"
+	"monitor-agent/internal/identity"
+	"monitor-agent/internal/pairing"
+	"monitor-agent/internal/transport"
 	"monitor-agent/internal/uploader"
 	"monitor-agent/pkg/client"
 	"monitor-agent/pkg/logger"
@@ -23,6 +27,7 @@ import (
 
 func main() {
 	configPath := flag.String("config", "", "config file path")
+	showInfo := flag.Bool("info", false, "show node identity and exit")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -30,12 +35,31 @@ func main() {
 		panic("load config: " + err.Error())
 	}
 
+	// Identity: load or create Node ID + RSA key pair
+	nodeIdentity, err := identity.LoadOrCreate(cfg.Device.DataDir)
+	if err != nil {
+		panic("init identity: " + err.Error())
+	}
+
+	if *showInfo {
+		fp, _ := nodeIdentity.FingerprintStr()
+		fmt.Printf("Node ID:      %s\n", nodeIdentity.NodeID)
+		fmt.Printf("Key Storage:  %s\n", nodeIdentity.StorageType())
+		fmt.Printf("Public Key:   %s (SHA-256)\n", fp)
+		fmt.Printf("Data Dir:     %s\n", cfg.Device.DataDir)
+		os.Exit(0)
+	}
+
 	if err := logger.Init(cfg.Logs.Level, cfg.Logs.File, cfg.Logs.MaxSize, cfg.Logs.MaxBackups); err != nil {
 		panic("init logger: " + err.Error())
 	}
 	defer logger.Sync()
 
-	logger.Info("monitor-agent starting", "version", device.AgentVersion, "server", cfg.Server.URL)
+	logger.Info("monitor-agent starting",
+		"version", device.AgentVersion,
+		"server", cfg.Server.URL,
+		"node_id", nodeIdentity.NodeID,
+		"key_storage", nodeIdentity.StorageType())
 
 	// HTTP 客户端
 	retry := client.RetryConfig{
@@ -46,34 +70,31 @@ func main() {
 	cli := client.New(cfg.Server.URL, cfg.Server.Timeout, retry)
 	up := uploader.New(cli)
 
-	// 设备 ID 与 API Key
-	deviceID, err := device.LoadID(cfg.Device.IDFile)
-	if err != nil {
-		logger.Error("load device id", "err", err)
-		os.Exit(1)
-	}
+	// 设备 ID（使用 Node ID 作为 Device ID）
+	deviceID := nodeIdentity.NodeID
 
+	// 认证：加载已有 API Key 或走配对码注册
 	apiKey, _ := device.LoadAPIKey(cfg.Device.APIKeyFile)
-	if apiKey == "" || deviceID == "" {
-		// 采集并注册
+	if apiKey == "" {
+		// 尝试配对码注册
 		info, err := device.Collect(deviceID)
 		if err != nil {
 			logger.Error("collect device info", "err", err)
 			os.Exit(1)
 		}
-		_, err = device.LoadOrStoreID(cfg.Device.IDFile, info.DeviceID)
-		if err != nil {
-			logger.Error("store device id", "err", err)
-			os.Exit(1)
-		}
-		deviceID = info.DeviceID
 
-		resp, err := up.Register(info)
+		apiKey, err = pairing.RunPairing(cli, nodeIdentity, info.Hostname, info.OSVersion)
 		if err != nil {
-			logger.Error("register device", "err", err)
-			os.Exit(1)
+			// 配对失败，降级到旧注册方式
+			logger.Warn("pairing failed, falling back to legacy register", "err", err)
+			resp, err := up.Register(info)
+			if err != nil {
+				logger.Error("register device (legacy)", "err", err)
+				os.Exit(1)
+			}
+			apiKey = resp.APIKey
 		}
-		apiKey = resp.APIKey
+
 		if err := device.StoreAPIKey(cfg.Device.APIKeyFile, apiKey); err != nil {
 			logger.Error("store api key", "err", err)
 			os.Exit(1)
@@ -82,17 +103,52 @@ func main() {
 	}
 	cli.SetAPIKey(apiKey)
 
-	// Redis 连接与命令消费
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     cfg.Redis.Addr,
-		Password: cfg.Redis.Password,
-		DB:       cfg.Redis.DB,
-	})
-	if err := rdb.Ping(context.Background()).Err(); err != nil {
-		logger.Warn("redis connection failed, command consumer disabled", "err", err)
-		rdb = nil
-	} else {
-		logger.Info("redis connected", "addr", cfg.Redis.Addr)
+	// 命令通道 + 结果上报
+	var cmdBroker transport.CommandBroker
+	var resultReporter transport.ResultReporter
+	var rdb *goredis.Client
+
+	switch cfg.Transport.Type {
+	case "mqtt":
+		mqttBrokerURL := cfg.Transport.MQTT.Broker
+		if mqttBrokerURL == "" {
+			mqttBrokerURL = "tcp://localhost:1883"
+		}
+		mqttBroker, err := transport.NewMQTTBroker(transport.MQTTBrokerConfig{
+			BrokerURL:     mqttBrokerURL,
+			DeviceID:      deviceID,
+			KeepAlive:     cfg.Transport.MQTT.KeepAlive,
+			AutoReconnect: cfg.Transport.MQTT.AutoReconnect,
+			Username:      cfg.Transport.MQTT.Username,
+			Password:      cfg.Transport.MQTT.Password,
+			UseTLS:        cfg.Transport.MQTT.UseTLS,
+		})
+		if err != nil {
+			logger.Warn("MQTT connection failed, falling back to Redis", "err", err)
+		} else {
+			cmdBroker = mqttBroker
+			resultReporter = mqttBroker
+			logger.Info("transport: MQTT", "broker", mqttBrokerURL)
+		}
+	}
+
+	if cmdBroker == nil {
+		rdb = goredis.NewClient(&goredis.Options{
+			Addr:     cfg.Redis.Addr,
+			Password: cfg.Redis.Password,
+			DB:       cfg.Redis.DB,
+		})
+		if err := rdb.Ping(context.Background()).Err(); err != nil {
+			logger.Warn("redis connection failed, command consumer disabled", "err", err)
+			rdb = nil
+		} else {
+			logger.Info("transport: Redis", "addr", cfg.Redis.Addr)
+			cmdBroker = transport.NewRedisBroker(rdb)
+		}
+	}
+
+	if resultReporter == nil {
+		resultReporter = transport.NewHTTPResultReporter(cli)
 	}
 
 	// 离线缓存（可选）
@@ -208,6 +264,11 @@ func main() {
 				var extraData *string
 				if heartbeatCount%openclawInterval == 1 {
 					if info, err := collector.CollectOpenClawInfo(); err == nil {
+						hasOverview := info.Overview != nil
+						hasDiagnosis := info.Diagnosis != nil
+						if !hasOverview || !hasDiagnosis {
+							logger.Info("openclaw parsed", "overview", hasOverview, "diagnosis", hasDiagnosis)
+						}
 						if b, err := json.Marshal(info); err == nil {
 							s := string(b)
 							extraData = &s
@@ -331,8 +392,8 @@ func main() {
 		}
 	}()
 
-	// 命令消费（需要 Redis）
-	if rdb != nil {
+	// 命令消费
+	if cmdBroker != nil {
 		wg.Add(1)
 		go func() {
 			defer func() {
@@ -341,7 +402,13 @@ func main() {
 				}
 			}()
 			defer wg.Done()
-			consumer := command.NewConsumer(rdb, deviceID, cli)
+			var acker transport.Acknowledger
+			var progress transport.ProgressReporter
+			if mqttBrk, ok := cmdBroker.(*transport.MQTTBroker); ok {
+				acker = mqttBrk
+				progress = mqttBrk
+			}
+			consumer := command.NewConsumer(cmdBroker, deviceID, resultReporter, nodeIdentity.PrivateKey, acker, progress)
 			consumer.Run(ctx)
 		}()
 	}

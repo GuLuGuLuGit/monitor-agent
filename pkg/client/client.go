@@ -90,6 +90,45 @@ func (c *Client) Post(path string, body interface{}, dataDest interface{}) error
 	return lastErr
 }
 
+// Get sends a GET request (no retry for simplicity; used in pairing poll).
+func (c *Client) Get(path string, dataDest interface{}) error {
+	url := c.BaseURL + path
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("new request: %w", err)
+	}
+	if c.APIKey != "" {
+		req.Header.Set("X-API-Key", c.APIKey)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("do request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read body: %w", err)
+	}
+
+	var apiResp APIResponse
+	if err := json.Unmarshal(raw, &apiResp); err != nil {
+		return fmt.Errorf("unmarshal response: %w", err)
+	}
+
+	if apiResp.Code != 0 {
+		return fmt.Errorf("api error code=%d message=%s", apiResp.Code, apiResp.Message)
+	}
+
+	if dataDest != nil && len(apiResp.Data) > 0 {
+		if err := json.Unmarshal(apiResp.Data, dataDest); err != nil {
+			return fmt.Errorf("unmarshal data: %w", err)
+		}
+	}
+	return nil
+}
+
 func (c *Client) postOnce(path string, body interface{}, dataDest interface{}) error {
 	url := c.BaseURL + path
 	var bodyReader io.Reader
