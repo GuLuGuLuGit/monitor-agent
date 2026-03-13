@@ -3,6 +3,7 @@ package collector
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -131,6 +132,37 @@ func CollectOpenClawInfo() (*OpenClawInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	needsAgents := len(info.Agents) == 0
+	needsNames := false
+	if !needsAgents {
+		for _, a := range info.Agents {
+			if strings.TrimSpace(a.Name) == "" {
+				needsNames = true
+				break
+			}
+		}
+	}
+	if needsAgents || needsNames {
+		if agents := collectAgentsList(); len(agents) > 0 {
+			if needsAgents {
+				info.Agents = agents
+			} else if needsNames {
+				nameMap := make(map[string]string, len(agents))
+				for _, a := range agents {
+					if a.ID != "" && a.Name != "" {
+						nameMap[a.ID] = a.Name
+					}
+				}
+				for i := range info.Agents {
+					if strings.TrimSpace(info.Agents[i].Name) == "" {
+						if n, ok := nameMap[info.Agents[i].ID]; ok {
+							info.Agents[i].Name = n
+						}
+					}
+				}
+			}
+		}
+	}
 
 	type collector struct {
 		name string
@@ -190,6 +222,37 @@ func runQuickCLI(timeout time.Duration, args ...string) string {
 		}
 	}
 	return stripANSI(strings.TrimSpace(out))
+}
+
+func collectAgentsList() []OpenClawAgent {
+	out := runQuickCLI(10*time.Second, "agents", "list", "--json")
+	if out == "" {
+		return nil
+	}
+	type agentItem struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	var items []agentItem
+	if err := json.Unmarshal([]byte(out), &items); err != nil {
+		return nil
+	}
+	agents := make([]OpenClawAgent, 0, len(items))
+	for _, item := range items {
+		id := strings.TrimSpace(item.ID)
+		if id == "" {
+			continue
+		}
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
+			name = id
+		}
+		agents = append(agents, OpenClawAgent{ID: id, Name: name})
+	}
+	if len(agents) == 0 {
+		return nil
+	}
+	return agents
 }
 
 func collectUpdateStatus() *OpenClawUpdate {
@@ -387,6 +450,9 @@ func parseOpenClawStatusAll(out string) (*OpenClawInfo, error) {
 			Bootstrap: strings.TrimSpace(row["Bootstrap file"]),
 		})
 	}
+	if len(info.Agents) == 0 {
+		info.Agents = parseAgentsLoose(lines)
+	}
 
 	// Diagnosis：Skills: N eligible · M missing
 	if d := parseDiagnosis(lines); d != nil {
@@ -512,6 +578,80 @@ func parseTable(lines []string, sectionTitle string, headers []string) []map[str
 		result = append(result, row)
 	}
 	return result
+}
+
+// parseAgentsLoose 尝试在表头无法识别时，直接从 Agents section 中提取
+func parseAgentsLoose(lines []string) []OpenClawAgent {
+	start := findSectionStart(lines, "Agents")
+	if start < 0 {
+		return nil
+	}
+	var agents []OpenClawAgent
+	for i := start + 1; i < len(lines); i++ {
+		line := lines[i]
+		if isNextSection(line) {
+			break
+		}
+		if isTableSeparator(line) || strings.TrimSpace(line) == "" {
+			continue
+		}
+		cols := splitTableRow(line)
+		if len(cols) == 0 {
+			continue
+		}
+		if isAgentHeaderRow(cols) {
+			continue
+		}
+		offset := 0
+		for offset < len(cols) && strings.TrimSpace(cols[offset]) == "" {
+			offset++
+		}
+		if offset >= len(cols) {
+			continue
+		}
+		agentCell := strings.TrimSpace(cols[offset])
+		if agentCell == "" {
+			continue
+		}
+		id, name := parseAgentIDAndName(agentCell)
+		bootstrap := ""
+		sessions := 0
+		active := ""
+		if offset+1 < len(cols) {
+			bootstrap = strings.TrimSpace(cols[offset+1])
+		}
+		if offset+2 < len(cols) {
+			sessions = parseInt(cols[offset+2], 0)
+		}
+		if offset+3 < len(cols) {
+			active = strings.TrimSpace(cols[offset+3])
+		}
+		agents = append(agents, OpenClawAgent{
+			ID:        id,
+			Name:      name,
+			Sessions:  sessions,
+			Active:    active,
+			Bootstrap: bootstrap,
+		})
+	}
+	if len(agents) == 0 {
+		return nil
+	}
+	return agents
+}
+
+func isAgentHeaderRow(cols []string) bool {
+	for _, c := range cols {
+		cell := strings.TrimSpace(c)
+		if cell == "" {
+			continue
+		}
+		lower := strings.ToLower(cell)
+		if lower == "agent" || lower == "agents" || strings.Contains(lower, "bootstrap") || lower == "sessions" || lower == "active" || lower == "store" {
+			return true
+		}
+	}
+	return false
 }
 
 // parseChannelAccounts 查找 "Telegram accounts" 或 "{channel} accounts" 表，返回账号列表
