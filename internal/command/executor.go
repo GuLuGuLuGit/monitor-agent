@@ -26,6 +26,7 @@ const (
 	TypeSessions = "openclaw_sessions"
 	TypeSecurity = "openclaw_security"
 	TypeGateway  = "openclaw_gateway"
+	TypeMessage  = "openclaw_message"
 
 	serviceName    = "ai.openclaw.gateway"
 	defaultTimeout = 60 * time.Second
@@ -69,6 +70,8 @@ func Execute(commandType string, params map[string]interface{}) *Result {
 		result = execSecurity(params)
 	case TypeGateway:
 		result = execGatewayCmd(params)
+	case TypeMessage:
+		result = execMessage(params)
 	default:
 		result = &Result{
 			Status:       3,
@@ -375,4 +378,79 @@ func execGatewayCmd(params map[string]interface{}) *Result {
 	default:
 		return &Result{Status: 3, ErrorMessage: fmt.Sprintf("unknown gateway action: %s (use status, health, or restart)", action)}
 	}
+}
+
+func execMessage(params map[string]interface{}) *Result {
+	message, _ := params["message"].(string)
+	if strings.TrimSpace(message) == "" {
+		return &Result{Status: 3, ErrorMessage: "message is required"}
+	}
+
+	agentID, _ := params["agent_id"].(string)
+	args := []string{"agent", "--message", message, "--json"}
+	if agentID != "" {
+		args = append(args, "--agent", agentID)
+	}
+
+	if v, ok := params["session_id"].(string); ok && v != "" {
+		args = append(args, "--session-id", v)
+	}
+	if v, ok := params["channel"].(string); ok && v != "" {
+		args = append(args, "--channel", v)
+	}
+	if v, ok := params["to"].(string); ok && v != "" {
+		args = append(args, "--to", v)
+	}
+	if v, ok := params["deliver"].(bool); ok && v {
+		args = append(args, "--deliver")
+	}
+	if v, ok := params["thinking"].(string); ok && v != "" {
+		args = append(args, "--thinking", v)
+	}
+
+	timeout := defaultTimeout
+	if v, ok := params["timeout"].(float64); ok && v > 0 {
+		timeout = time.Duration(int(v)) * time.Second
+	}
+
+	out, err := runCLI(timeout, args...)
+	if err != nil && out == "" {
+		return &Result{Status: 3, ErrorMessage: fmt.Sprintf("openclaw agent failed: %v", err)}
+	}
+
+	reply := extractAgentReply(out)
+	if err != nil {
+		return &Result{Status: 3, Output: reply, ErrorMessage: err.Error()}
+	}
+	return &Result{Status: 2, Output: reply}
+}
+
+func extractAgentReply(out string) string {
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return out
+	}
+
+	// Try best-effort JSON extraction first.
+	var payload map[string]interface{}
+	if json.Unmarshal([]byte(out), &payload) == nil {
+		if v := pickFirstString(payload, "reply", "message", "output", "result"); v != "" {
+			return v
+		}
+		if data, ok := payload["data"].(map[string]interface{}); ok {
+			if v := pickFirstString(data, "reply", "message", "output", "result"); v != "" {
+				return v
+			}
+		}
+	}
+	return out
+}
+
+func pickFirstString(m map[string]interface{}, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := m[k].(string); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
