@@ -20,6 +20,10 @@ type OpenClawInfo struct {
 	Bindings   []OpenClawBinding   `json:"bindings"`
 	Model      string              `json:"model,omitempty"`
 	Diagnosis  *OpenClawDiagnosis  `json:"diagnosis,omitempty"`
+	Update     *OpenClawUpdate     `json:"update,omitempty"`
+	Gateway    *OpenClawGateway    `json:"gateway,omitempty"`
+	Models     *OpenClawModels     `json:"models,omitempty"`
+	Daemon     *OpenClawDaemon     `json:"daemon,omitempty"`
 }
 
 type OpenClawOverview struct {
@@ -72,7 +76,35 @@ type OpenClawDiagnosis struct {
 	ChannelIssues  string `json:"channel_issues,omitempty"`
 }
 
-// CollectOpenClawInfo 执行 openclaw status --all 并解析输出，用于心跳上报
+type OpenClawUpdate struct {
+	Install   string `json:"install,omitempty"`
+	Channel   string `json:"channel,omitempty"`
+	Available string `json:"available,omitempty"`
+}
+
+type OpenClawGateway struct {
+	Service  string `json:"service,omitempty"`
+	Runtime  string `json:"runtime,omitempty"`
+	Bind     string `json:"bind,omitempty"`
+	Port     string `json:"port,omitempty"`
+	RPCProbe string `json:"rpc_probe,omitempty"`
+}
+
+type OpenClawModels struct {
+	Default       string `json:"default,omitempty"`
+	ImageModel    string `json:"image_model,omitempty"`
+	FallbackCount int    `json:"fallback_count,omitempty"`
+	AliasCount    int    `json:"alias_count,omitempty"`
+}
+
+type OpenClawDaemon struct {
+	Service string `json:"service,omitempty"`
+	Runtime string `json:"runtime,omitempty"`
+	LogFile string `json:"log_file,omitempty"`
+}
+
+// CollectOpenClawInfo 执行 openclaw status --all 并解析输出，用于心跳上报。
+// 同时采集 update status、gateway status、models status、daemon status 的精简信息。
 func CollectOpenClawInfo() (*OpenClawInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -85,7 +117,6 @@ func CollectOpenClawInfo() (*OpenClawInfo, error) {
 	}
 	out := stdout.String()
 	stderrStr := stderr.String()
-	// 若 stdout 过短，可能主要内容在 stderr（不少 CLI 将表格输出到 stderr），合并后解析
 	if len(stderrStr) > 0 {
 		if len(out) > 0 {
 			out = out + "\n" + stderrStr
@@ -93,12 +124,209 @@ func CollectOpenClawInfo() (*OpenClawInfo, error) {
 			out = stderrStr
 		}
 	}
-	// 统一换行并去掉行尾 \r，避免 section 标题匹配失败
 	out = strings.ReplaceAll(out, "\r\n", "\n")
 	out = strings.ReplaceAll(out, "\r", "\n")
-	// 非 TTY 下 CLI 仍可能输出 ANSI 颜色码，导致 "Overview" 等标题匹配失败，先剥掉
 	out = stripANSI(out)
-	return parseOpenClawStatusAll(out)
+	info, err := parseOpenClawStatusAll(out)
+	if err != nil {
+		return nil, err
+	}
+
+	type collector struct {
+		name string
+		fn   func() interface{}
+	}
+	extras := []collector{
+		{"update", func() interface{} { return collectUpdateStatus() }},
+		{"gateway", func() interface{} { return collectGatewayStatus() }},
+		{"models", func() interface{} { return collectModelsStatus() }},
+		{"daemon", func() interface{} { return collectDaemonStatus() }},
+	}
+	type indexedResult struct {
+		idx int
+		val interface{}
+	}
+	ch := make(chan indexedResult, len(extras))
+	for i, c := range extras {
+		go func(idx int, fn func() interface{}) {
+			ch <- indexedResult{idx, fn()}
+		}(i, c.fn)
+	}
+	results := make([]interface{}, len(extras))
+	for range extras {
+		r := <-ch
+		results[r.idx] = r.val
+	}
+	if v, ok := results[0].(*OpenClawUpdate); ok {
+		info.Update = v
+	}
+	if v, ok := results[1].(*OpenClawGateway); ok {
+		info.Gateway = v
+	}
+	if v, ok := results[2].(*OpenClawModels); ok {
+		info.Models = v
+	}
+	if v, ok := results[3].(*OpenClawDaemon); ok {
+		info.Daemon = v
+	}
+
+	return info, nil
+}
+
+func runQuickCLI(timeout time.Duration, args ...string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "openclaw", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	_ = cmd.Run()
+	out := stdout.String()
+	if se := stderr.String(); se != "" {
+		if out != "" {
+			out += "\n" + se
+		} else {
+			out = se
+		}
+	}
+	return stripANSI(strings.TrimSpace(out))
+}
+
+func collectUpdateStatus() *OpenClawUpdate {
+	out := runQuickCLI(10*time.Second, "update", "status")
+	if out == "" {
+		return nil
+	}
+	u := &OpenClawUpdate{}
+	for _, line := range strings.Split(out, "\n") {
+		lower := strings.ToLower(strings.TrimSpace(line))
+		if strings.Contains(lower, "install") {
+			u.Install = extractTableValue(line)
+		} else if strings.Contains(lower, "channel") {
+			u.Channel = extractTableValue(line)
+		} else if strings.Contains(lower, "update") && !strings.HasPrefix(lower, "openclaw") {
+			u.Available = extractTableValue(line)
+		}
+	}
+	if u.Install == "" && u.Channel == "" && u.Available == "" {
+		if strings.Contains(strings.ToLower(out), "available") {
+			u.Available = out
+		} else {
+			return nil
+		}
+	}
+	return u
+}
+
+func collectGatewayStatus() *OpenClawGateway {
+	out := runQuickCLI(10*time.Second, "gateway", "status")
+	if out == "" {
+		return nil
+	}
+	g := &OpenClawGateway{}
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		switch {
+		case strings.HasPrefix(lower, "service:"):
+			g.Service = strings.TrimSpace(trimmed[len("Service:"):])
+		case strings.HasPrefix(lower, "runtime:"):
+			g.Runtime = strings.TrimSpace(trimmed[len("Runtime:"):])
+		case strings.HasPrefix(lower, "gateway:") && strings.Contains(lower, "bind"):
+			g.Bind = strings.TrimSpace(trimmed[len("Gateway:"):])
+		case strings.HasPrefix(lower, "listening:"):
+			g.Port = strings.TrimSpace(trimmed[len("Listening:"):])
+		case strings.HasPrefix(lower, "rpc probe:"):
+			g.RPCProbe = strings.TrimSpace(trimmed[len("RPC probe:"):])
+		}
+	}
+	if g.Service == "" && g.Runtime == "" {
+		return nil
+	}
+	return g
+}
+
+func collectModelsStatus() *OpenClawModels {
+	out := runQuickCLI(10*time.Second, "models", "status")
+	if out == "" {
+		return nil
+	}
+	m := &OpenClawModels{}
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		switch {
+		case strings.HasPrefix(lower, "default"):
+			parts := strings.SplitN(trimmed, ":", 2)
+			if len(parts) == 2 {
+				m.Default = strings.TrimSpace(parts[1])
+			}
+		case strings.HasPrefix(lower, "image model"):
+			parts := strings.SplitN(trimmed, ":", 2)
+			if len(parts) == 2 {
+				m.ImageModel = strings.TrimSpace(parts[1])
+			}
+		case strings.HasPrefix(lower, "fallbacks"):
+			m.FallbackCount = extractParenNumber(trimmed)
+		case strings.HasPrefix(lower, "aliases"):
+			m.AliasCount = extractParenNumber(trimmed)
+		}
+	}
+	if m.Default == "" {
+		return nil
+	}
+	return m
+}
+
+func collectDaemonStatus() *OpenClawDaemon {
+	out := runQuickCLI(10*time.Second, "daemon", "status")
+	if out == "" {
+		return nil
+	}
+	d := &OpenClawDaemon{}
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		switch {
+		case strings.HasPrefix(lower, "service:"):
+			d.Service = strings.TrimSpace(trimmed[len("Service:"):])
+		case strings.HasPrefix(lower, "runtime:"):
+			d.Runtime = strings.TrimSpace(trimmed[len("Runtime:"):])
+		case strings.HasPrefix(lower, "file logs:"):
+			d.LogFile = strings.TrimSpace(trimmed[len("File logs:"):])
+		}
+	}
+	if d.Service == "" && d.Runtime == "" {
+		return nil
+	}
+	return d
+}
+
+func extractTableValue(line string) string {
+	for _, sep := range []string{"│", "|"} {
+		if strings.Contains(line, sep) {
+			parts := strings.Split(line, sep)
+			if len(parts) >= 3 {
+				return strings.TrimSpace(parts[2])
+			}
+			if len(parts) >= 2 {
+				return strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	if idx := strings.Index(line, ":"); idx >= 0 {
+		return strings.TrimSpace(line[idx+1:])
+	}
+	return strings.TrimSpace(line)
+}
+
+func extractParenNumber(s string) int {
+	start := strings.Index(s, "(")
+	end := strings.Index(s, ")")
+	if start >= 0 && end > start {
+		return parseInt(s[start+1:end], 0)
+	}
+	return 0
 }
 
 // stripANSI 去掉 ANSI 转义序列（如 \x1b[32m），便于按纯文本匹配 section 标题

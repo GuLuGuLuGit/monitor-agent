@@ -1,6 +1,7 @@
 package command
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,13 +14,21 @@ import (
 )
 
 const (
-	TypeStart   = "openclaw_start"
-	TypeStop    = "openclaw_stop"
-	TypeRestart = "openclaw_restart"
-	TypeStatus  = "openclaw_status"
-	TypeConfig  = "openclaw_config"
+	TypeStart    = "openclaw_start"
+	TypeStop     = "openclaw_stop"
+	TypeRestart  = "openclaw_restart"
+	TypeStatus   = "openclaw_status"
+	TypeConfig   = "openclaw_config"
+	TypeDoctor   = "openclaw_doctor"
+	TypeUpdate   = "openclaw_update"
+	TypeLogs     = "openclaw_logs"
+	TypeProbe    = "openclaw_probe"
+	TypeSessions = "openclaw_sessions"
+	TypeSecurity = "openclaw_security"
+	TypeGateway  = "openclaw_gateway"
 
-	serviceName = "ai.openclaw.gateway"
+	serviceName    = "ai.openclaw.gateway"
+	defaultTimeout = 60 * time.Second
 )
 
 // Result 命令执行结果
@@ -46,6 +55,20 @@ func Execute(commandType string, params map[string]interface{}) *Result {
 		result = execStatus()
 	case TypeConfig:
 		result = execConfig(params)
+	case TypeDoctor:
+		result = execDoctor()
+	case TypeUpdate:
+		result = execUpdate(params)
+	case TypeLogs:
+		result = execLogs(params)
+	case TypeProbe:
+		result = execProbe()
+	case TypeSessions:
+		result = execSessions(params)
+	case TypeSecurity:
+		result = execSecurity(params)
+	case TypeGateway:
+		result = execGatewayCmd(params)
 	default:
 		result = &Result{
 			Status:       3,
@@ -197,5 +220,159 @@ func execConfig(params map[string]interface{}) *Result {
 
 	default:
 		return &Result{Status: 3, ErrorMessage: fmt.Sprintf("unknown config action: %s", action)}
+	}
+}
+
+// runCLI executes an openclaw CLI command with a timeout and returns combined stdout+stderr.
+func runCLI(timeout time.Duration, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "openclaw", args...)
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+func execDoctor() *Result {
+	out, err := runCLI(defaultTimeout, "doctor")
+	if err != nil && out == "" {
+		return &Result{Status: 3, ErrorMessage: fmt.Sprintf("openclaw doctor failed: %v", err)}
+	}
+	return &Result{Status: 2, Output: out}
+}
+
+func execUpdate(params map[string]interface{}) *Result {
+	action, _ := params["action"].(string)
+	if action == "" {
+		action = "check"
+	}
+
+	switch action {
+	case "check":
+		out, err := runCLI(30*time.Second, "update", "status")
+		if err != nil && out == "" {
+			return &Result{Status: 3, ErrorMessage: fmt.Sprintf("openclaw update status failed: %v", err)}
+		}
+		return &Result{Status: 2, Output: out}
+	case "apply":
+		channel, _ := params["channel"].(string)
+		args := []string{"update"}
+		if channel != "" {
+			args = append(args, "--channel", channel)
+		}
+		out, err := runCLI(5*time.Minute, args...)
+		if err != nil && out == "" {
+			return &Result{Status: 3, ErrorMessage: fmt.Sprintf("openclaw update failed: %v", err)}
+		}
+		return &Result{Status: 2, Output: out}
+	default:
+		return &Result{Status: 3, ErrorMessage: fmt.Sprintf("unknown update action: %s (use check or apply)", action)}
+	}
+}
+
+func execLogs(params map[string]interface{}) *Result {
+	lines := 50
+	if v, ok := params["lines"].(float64); ok && v > 0 {
+		lines = int(v)
+		if lines > 500 {
+			lines = 500
+		}
+	}
+
+	args := []string{"logs", fmt.Sprintf("--lines=%d", lines)}
+	out, err := runCLI(15*time.Second, args...)
+	if err != nil && out == "" {
+		return &Result{Status: 3, ErrorMessage: fmt.Sprintf("openclaw logs failed: %v", err)}
+	}
+	return &Result{Status: 2, Output: out}
+}
+
+func execProbe() *Result {
+	var parts []string
+
+	gwOut, _ := runCLI(15*time.Second, "gateway", "probe")
+	if gwOut != "" {
+		parts = append(parts, "=== Gateway Probe ===\n"+gwOut)
+	}
+
+	chOut, _ := runCLI(30*time.Second, "channels", "status", "--probe")
+	if chOut != "" {
+		parts = append(parts, "=== Channels Probe ===\n"+chOut)
+	}
+
+	if len(parts) == 0 {
+		return &Result{Status: 3, ErrorMessage: "probe commands returned no output"}
+	}
+	return &Result{Status: 2, Output: strings.Join(parts, "\n\n")}
+}
+
+func execSessions(params map[string]interface{}) *Result {
+	action, _ := params["action"].(string)
+	if action == "" {
+		action = "list"
+	}
+
+	switch action {
+	case "list":
+		out, err := runCLI(15*time.Second, "sessions")
+		if err != nil && out == "" {
+			return &Result{Status: 3, ErrorMessage: fmt.Sprintf("openclaw sessions failed: %v", err)}
+		}
+		return &Result{Status: 2, Output: out}
+	case "cleanup":
+		dryRun, _ := params["dry_run"].(bool)
+		args := []string{"sessions", "cleanup"}
+		if dryRun {
+			args = append(args, "--dry-run")
+		}
+		out, err := runCLI(30*time.Second, args...)
+		if err != nil && out == "" {
+			return &Result{Status: 3, ErrorMessage: fmt.Sprintf("openclaw sessions cleanup failed: %v", err)}
+		}
+		return &Result{Status: 2, Output: out}
+	default:
+		return &Result{Status: 3, ErrorMessage: fmt.Sprintf("unknown sessions action: %s (use list or cleanup)", action)}
+	}
+}
+
+func execSecurity(params map[string]interface{}) *Result {
+	deep, _ := params["deep"].(bool)
+	args := []string{"security", "audit"}
+	if deep {
+		args = append(args, "--deep")
+	}
+	out, err := runCLI(defaultTimeout, args...)
+	if err != nil && out == "" {
+		return &Result{Status: 3, ErrorMessage: fmt.Sprintf("openclaw security audit failed: %v", err)}
+	}
+	return &Result{Status: 2, Output: out}
+}
+
+func execGatewayCmd(params map[string]interface{}) *Result {
+	action, _ := params["action"].(string)
+	if action == "" {
+		action = "status"
+	}
+
+	switch action {
+	case "status":
+		out, err := runCLI(15*time.Second, "gateway", "status")
+		if err != nil && out == "" {
+			return &Result{Status: 3, ErrorMessage: fmt.Sprintf("openclaw gateway status failed: %v", err)}
+		}
+		return &Result{Status: 2, Output: out}
+	case "health":
+		out, err := runCLI(15*time.Second, "gateway", "health")
+		if err != nil && out == "" {
+			return &Result{Status: 3, ErrorMessage: fmt.Sprintf("openclaw gateway health failed: %v", err)}
+		}
+		return &Result{Status: 2, Output: out}
+	case "restart":
+		out, err := runCLI(30*time.Second, "gateway", "restart")
+		if err != nil && out == "" {
+			return &Result{Status: 3, ErrorMessage: fmt.Sprintf("openclaw gateway restart failed: %v", err)}
+		}
+		return &Result{Status: 2, Output: out}
+	default:
+		return &Result{Status: 3, ErrorMessage: fmt.Sprintf("unknown gateway action: %s (use status, health, or restart)", action)}
 	}
 }
