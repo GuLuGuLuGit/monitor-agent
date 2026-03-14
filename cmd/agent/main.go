@@ -85,14 +85,8 @@ func main() {
 
 		apiKey, err = pairing.RunPairing(cli, nodeIdentity, info.Hostname, info.OSVersion)
 		if err != nil {
-			// 配对失败，降级到旧注册方式
-			logger.Warn("pairing failed, falling back to legacy register", "err", err)
-			resp, err := up.Register(info)
-			if err != nil {
-				logger.Error("register device (legacy)", "err", err)
-				os.Exit(1)
-			}
-			apiKey = resp.APIKey
+			logger.Error("pairing failed", "err", err)
+			os.Exit(1)
 		}
 
 		if err := device.StoreAPIKey(cfg.Device.APIKeyFile, apiKey); err != nil {

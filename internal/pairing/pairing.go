@@ -1,10 +1,12 @@
 package pairing
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
 	"monitor-agent/internal/identity"
+	agentCrypto "monitor-agent/pkg/crypto"
 	"monitor-agent/pkg/client"
 	"monitor-agent/pkg/logger"
 )
@@ -29,8 +31,8 @@ type pairingRequestResp struct {
 }
 
 type pairingStatusResp struct {
-	Status string `json:"status"`
-	APIKey string `json:"api_key"`
+	Status         string                `json:"status"`
+	APIKeyEnvelope *agentCrypto.Envelope `json:"api_key_envelope"`
 }
 
 // RunPairing executes the pairing flow: request code, display it, poll until
@@ -84,9 +86,25 @@ func RunPairing(httpClient *client.Client, id *identity.Identity, hostname, osVe
 
 			switch statusResp.Status {
 			case "paired":
+				if statusResp.APIKeyEnvelope == nil {
+					return "", fmt.Errorf("pairing completed but api key envelope missing")
+				}
+				plaintext, err := agentCrypto.Open(id.PrivateKey, statusResp.APIKeyEnvelope)
+				if err != nil {
+					return "", fmt.Errorf("decrypt api key envelope: %w", err)
+				}
+				var payload struct {
+					APIKey string `json:"api_key"`
+				}
+				if err := json.Unmarshal(plaintext, &payload); err != nil {
+					return "", fmt.Errorf("decode api key envelope: %w", err)
+				}
+				if payload.APIKey == "" {
+					return "", fmt.Errorf("pairing completed but api key missing")
+				}
 				logger.Info("pairing successful")
 				fmt.Println("[✓] 配对成功！设备已绑定。")
-				return statusResp.APIKey, nil
+				return payload.APIKey, nil
 			case "expired":
 				logger.Info("pairing code expired, requesting new code")
 				fmt.Println("[!] 配对码已过期，正在申请新的配对码...")
