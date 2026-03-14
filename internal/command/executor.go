@@ -431,10 +431,13 @@ func execMessage(params map[string]interface{}) *Result {
 	}
 
 	reply := extractAgentReply(out)
+	if reply != "" {
+		return &Result{Status: 2, Output: reply}
+	}
 	if err != nil {
 		return &Result{Status: 3, Output: reply, ErrorMessage: err.Error()}
 	}
-	return &Result{Status: 2, Output: reply}
+	return &Result{Status: 2, Output: out}
 }
 
 func extractAgentReply(out string) string {
@@ -445,14 +448,17 @@ func extractAgentReply(out string) string {
 
 	var payload interface{}
 	if json.Unmarshal([]byte(out), &payload) == nil {
-		if v := findReplyString(payload); v != "" {
+		if v := findReplyString(payload, 0); v != "" {
 			return v
 		}
 	}
 	return out
 }
 
-func findReplyString(v interface{}) string {
+func findReplyString(v interface{}, depth int) string {
+	if depth > 8 {
+		return ""
+	}
 	switch value := v.(type) {
 	case string:
 		value = strings.TrimSpace(value)
@@ -461,34 +467,47 @@ func findReplyString(v interface{}) string {
 		}
 		var nested interface{}
 		if json.Unmarshal([]byte(value), &nested) == nil {
-			if reply := findReplyString(nested); reply != "" {
+			if reply := findReplyString(nested, depth+1); reply != "" {
 				return reply
 			}
 		}
 		return value
 	case map[string]interface{}:
+		// Prefer the structured payload returned by openclaw agent --json.
+		for _, key := range []string{"payloads", "messages", "choices"} {
+			if raw, ok := value[key]; ok {
+				if reply := findReplyString(raw, depth+1); reply != "" {
+					return reply
+				}
+			}
+		}
 		for _, key := range []string{"reply", "message", "output", "result", "content", "text"} {
 			if raw, ok := value[key]; ok {
-				if reply := findReplyString(raw); reply != "" {
+				if reply := findReplyString(raw, depth+1); reply != "" {
 					return reply
 				}
 			}
 		}
-		for _, key := range []string{"data", "response", "assistant", "payload"} {
+		for _, key := range []string{"data", "response", "assistant", "payload", "result"} {
 			if raw, ok := value[key]; ok {
-				if reply := findReplyString(raw); reply != "" {
+				if reply := findReplyString(raw, depth+1); reply != "" {
 					return reply
 				}
 			}
 		}
+		// Last resort: recurse only into nested containers, avoid arbitrary scalar fields
+		// like runId/status that would otherwise be returned as the "reply".
 		for _, raw := range value {
-			if reply := findReplyString(raw); reply != "" {
-				return reply
+			switch raw.(type) {
+			case map[string]interface{}, []interface{}:
+				if reply := findReplyString(raw, depth+1); reply != "" {
+					return reply
+				}
 			}
 		}
 	case []interface{}:
 		for _, item := range value {
-			if reply := findReplyString(item); reply != "" {
+			if reply := findReplyString(item, depth+1); reply != "" {
 				return reply
 			}
 		}
