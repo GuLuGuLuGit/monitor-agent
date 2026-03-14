@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"monitor-agent/internal/openclawcli"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -109,7 +110,7 @@ type OpenClawDaemon struct {
 func CollectOpenClawInfo() (*OpenClawInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "openclaw", "status", "--all")
+	cmd := exec.CommandContext(ctx, openclawcli.BinaryPath(), "status", "--all")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -208,7 +209,7 @@ func CollectOpenClawInfo() (*OpenClawInfo, error) {
 func runQuickCLI(timeout time.Duration, args ...string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "openclaw", args...)
+	cmd := exec.CommandContext(ctx, openclawcli.BinaryPath(), args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"monitor-agent/internal/openclawcli"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -233,7 +234,7 @@ func execConfig(params map[string]interface{}) *Result {
 func runCLI(timeout time.Duration, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "openclaw", args...)
+	cmd := exec.CommandContext(ctx, openclawcli.BinaryPath(), args...)
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
