@@ -443,25 +443,54 @@ func extractAgentReply(out string) string {
 		return out
 	}
 
-	// Try best-effort JSON extraction first.
-	var payload map[string]interface{}
+	var payload interface{}
 	if json.Unmarshal([]byte(out), &payload) == nil {
-		if v := pickFirstString(payload, "reply", "message", "output", "result"); v != "" {
+		if v := findReplyString(payload); v != "" {
 			return v
-		}
-		if data, ok := payload["data"].(map[string]interface{}); ok {
-			if v := pickFirstString(data, "reply", "message", "output", "result"); v != "" {
-				return v
-			}
 		}
 	}
 	return out
 }
 
-func pickFirstString(m map[string]interface{}, keys ...string) string {
-	for _, k := range keys {
-		if v, ok := m[k].(string); ok && strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v)
+func findReplyString(v interface{}) string {
+	switch value := v.(type) {
+	case string:
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return ""
+		}
+		var nested interface{}
+		if json.Unmarshal([]byte(value), &nested) == nil {
+			if reply := findReplyString(nested); reply != "" {
+				return reply
+			}
+		}
+		return value
+	case map[string]interface{}:
+		for _, key := range []string{"reply", "message", "output", "result", "content", "text"} {
+			if raw, ok := value[key]; ok {
+				if reply := findReplyString(raw); reply != "" {
+					return reply
+				}
+			}
+		}
+		for _, key := range []string{"data", "response", "assistant", "payload"} {
+			if raw, ok := value[key]; ok {
+				if reply := findReplyString(raw); reply != "" {
+					return reply
+				}
+			}
+		}
+		for _, raw := range value {
+			if reply := findReplyString(raw); reply != "" {
+				return reply
+			}
+		}
+	case []interface{}:
+		for _, item := range value {
+			if reply := findReplyString(item); reply != "" {
+				return reply
+			}
 		}
 	}
 	return ""
