@@ -83,6 +83,7 @@ func (c *Consumer) handleCommand(ctx context.Context, cmd *transport.Command) {
 		var decrypted struct {
 			CommandType   string                 `json:"command_type"`
 			CommandParams map[string]interface{} `json:"command_params"`
+			Params        map[string]interface{} `json:"params"`
 		}
 		if err := json.Unmarshal(plaintext, &decrypted); err != nil {
 			logger.Error("unmarshal decrypted command", "command_id", cmd.ID, "err", err)
@@ -92,6 +93,9 @@ func (c *Consumer) handleCommand(ctx context.Context, cmd *transport.Command) {
 
 		cmdType = decrypted.CommandType
 		cmdParams = decrypted.CommandParams
+		if len(cmdParams) == 0 && len(decrypted.Params) > 0 {
+			cmdParams = decrypted.Params
+		}
 		logger.Info("command decrypted", "command_id", cmd.ID, "type", cmdType)
 	}
 
