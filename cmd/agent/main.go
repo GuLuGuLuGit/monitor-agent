@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha1"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"monitor-agent/internal/config"
 	"monitor-agent/internal/device"
 	"monitor-agent/internal/identity"
+	"monitor-agent/internal/openclawstate"
 	"monitor-agent/internal/pairing"
 	"monitor-agent/internal/transport"
 	"monitor-agent/internal/uploader"
@@ -236,7 +238,7 @@ func main() {
 		}()
 	}
 
-	// 心跳（每 5 次心跳携带 openclaw 扩展数据）
+	// 心跳：默认每 5 次携带一次 openclaw 扩展数据；当 agent 列表变化或最近有消息活动时更积极上报。
 	wg.Add(1)
 	go func() {
 		defer func() {
@@ -249,6 +251,13 @@ func main() {
 		defer ticker.Stop()
 		heartbeatCount := 0
 		const openclawInterval = 5
+		const recentMessageWindow = 10 * time.Minute
+		const agentsChangeCooldown = 30 * time.Second
+		const messageActivityCooldown = 2 * time.Minute
+		var lastExtraHash string
+		var lastAgentsFingerprint string
+		var lastAgentsTriggeredAt time.Time
+		var lastMessageTriggeredAt time.Time
 		for {
 			select {
 			case <-ctx.Done():
@@ -256,7 +265,15 @@ func main() {
 			case <-ticker.C:
 				heartbeatCount++
 				var extraData *string
-				if heartbeatCount%openclawInterval == 1 {
+				intervalDue := heartbeatCount%openclawInterval == 1
+				recentMessage := openclawstate.RecentMessageActivityWithin(recentMessageWindow)
+				currentAgentsFingerprint := collector.CollectAgentsFingerprint()
+				agentsChanged := currentAgentsFingerprint != "" && currentAgentsFingerprint != lastAgentsFingerprint
+				agentsDue := agentsChanged && (lastAgentsTriggeredAt.IsZero() || time.Since(lastAgentsTriggeredAt) >= agentsChangeCooldown)
+				messageDue := recentMessage && (lastMessageTriggeredAt.IsZero() || time.Since(lastMessageTriggeredAt) >= messageActivityCooldown)
+				shouldCollectExtra := intervalDue || agentsDue || messageDue
+
+				if shouldCollectExtra {
 					if info, err := collector.CollectOpenClawInfo(); err == nil {
 						hasOverview := info.Overview != nil
 						hasDiagnosis := info.Diagnosis != nil
@@ -264,8 +281,48 @@ func main() {
 							logger.Info("openclaw parsed", "overview", hasOverview, "diagnosis", hasDiagnosis)
 						}
 						if b, err := json.Marshal(info); err == nil {
-							s := string(b)
-							extraData = &s
+							sum := sha1.Sum(b)
+							currentHash := fmt.Sprintf("%x", sum[:])
+							if intervalDue || agentsDue || messageDue || currentHash != lastExtraHash {
+								s := string(b)
+								extraData = &s
+								lastExtraHash = currentHash
+							}
+							if fp := collector.AgentsFingerprint(info.Agents); fp != "" {
+								lastAgentsFingerprint = fp
+							} else if currentAgentsFingerprint != "" {
+								lastAgentsFingerprint = currentAgentsFingerprint
+							}
+							if agentsDue {
+								lastAgentsTriggeredAt = time.Now()
+							}
+							if messageDue {
+								lastMessageTriggeredAt = time.Now()
+							}
+						}
+					} else {
+						logger.Warn("collect openclaw info failed", "err", err)
+						if fallback := collector.CollectAgentsOnlyInfo(); fallback != nil {
+							if b, marshalErr := json.Marshal(fallback); marshalErr == nil {
+								sum := sha1.Sum(b)
+								currentHash := fmt.Sprintf("%x", sum[:])
+								if intervalDue || agentsDue || messageDue || currentHash != lastExtraHash {
+									s := string(b)
+									extraData = &s
+									lastExtraHash = currentHash
+								}
+								if fp := collector.AgentsFingerprint(fallback.Agents); fp != "" {
+									lastAgentsFingerprint = fp
+								} else if currentAgentsFingerprint != "" {
+									lastAgentsFingerprint = currentAgentsFingerprint
+								}
+								if agentsDue {
+									lastAgentsTriggeredAt = time.Now()
+								}
+								if messageDue {
+									lastMessageTriggeredAt = time.Now()
+								}
+							}
 						}
 					}
 				}

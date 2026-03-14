@@ -3,9 +3,13 @@ package collector
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"encoding/json"
+	"fmt"
+	"path/filepath"
 	"monitor-agent/internal/openclawcli"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -146,18 +150,29 @@ func CollectOpenClawInfo() (*OpenClawInfo, error) {
 		if agents := collectAgentsList(); len(agents) > 0 {
 			if needsAgents {
 				info.Agents = agents
-			} else if needsNames {
-				nameMap := make(map[string]string, len(agents))
+			} else {
+				fallbackByID := make(map[string]OpenClawAgent, len(agents))
 				for _, a := range agents {
-					if a.ID != "" && a.Name != "" {
-						nameMap[a.ID] = a.Name
+					if a.ID != "" {
+						fallbackByID[a.ID] = a
 					}
 				}
 				for i := range info.Agents {
-					if strings.TrimSpace(info.Agents[i].Name) == "" {
-						if n, ok := nameMap[info.Agents[i].ID]; ok {
-							info.Agents[i].Name = n
-						}
+					fallback, ok := fallbackByID[info.Agents[i].ID]
+					if !ok {
+						continue
+					}
+					if strings.TrimSpace(info.Agents[i].Name) == "" && fallback.Name != "" {
+						info.Agents[i].Name = fallback.Name
+					}
+					if info.Agents[i].Sessions == 0 && fallback.Sessions > 0 {
+						info.Agents[i].Sessions = fallback.Sessions
+					}
+					if strings.TrimSpace(info.Agents[i].Active) == "" && fallback.Active != "" {
+						info.Agents[i].Active = fallback.Active
+					}
+					if strings.TrimSpace(info.Agents[i].Bootstrap) == "" && fallback.Bootstrap != "" {
+						info.Agents[i].Bootstrap = fallback.Bootstrap
 					}
 				}
 			}
@@ -230,8 +245,11 @@ func collectAgentsList() []OpenClawAgent {
 		return nil
 	}
 	type agentItem struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+		ID        string      `json:"id"`
+		Name      string      `json:"name"`
+		Sessions  interface{} `json:"sessions"`
+		Active    string      `json:"active"`
+		Bootstrap string      `json:"bootstrap"`
 	}
 	var items []agentItem
 	if err := json.Unmarshal([]byte(out), &items); err != nil {
@@ -247,12 +265,77 @@ func collectAgentsList() []OpenClawAgent {
 		if name == "" {
 			name = id
 		}
-		agents = append(agents, OpenClawAgent{ID: id, Name: name})
+		agents = append(agents, OpenClawAgent{
+			ID:        id,
+			Name:      name,
+			Sessions:  parseSessionsValue(item.Sessions),
+			Active:    normalizeAgentActive(item.Active),
+			Bootstrap: normalizeAgentBootstrap(item.Bootstrap),
+		})
 	}
 	if len(agents) == 0 {
 		return nil
 	}
 	return agents
+}
+
+func CollectAgentsFingerprint() string {
+	agents := collectAgentsList()
+	if len(agents) == 0 {
+		return ""
+	}
+	return AgentsFingerprint(agents)
+}
+
+func CollectAgentsOnlyInfo() *OpenClawInfo {
+	agents := collectAgentsList()
+	if len(agents) == 0 {
+		return nil
+	}
+	return &OpenClawInfo{
+		Overview: &OpenClawOverview{
+			AgentsSummary: fmt.Sprintf("%d agents", len(agents)),
+		},
+		Agents:   agents,
+		Channels: nil,
+		Bindings: nil,
+	}
+}
+
+func AgentsFingerprint(agents []OpenClawAgent) string {
+	if len(agents) == 0 {
+		return ""
+	}
+	type item struct {
+		ID   string `json:"id"`
+		Name string `json:"name,omitempty"`
+	}
+	snapshot := make([]item, 0, len(agents))
+	for _, agent := range agents {
+		id := strings.TrimSpace(agent.ID)
+		if id == "" {
+			continue
+		}
+		snapshot = append(snapshot, item{
+			ID:   id,
+			Name: strings.TrimSpace(agent.Name),
+		})
+	}
+	if len(snapshot) == 0 {
+		return ""
+	}
+	sort.Slice(snapshot, func(i, j int) bool {
+		if snapshot[i].ID == snapshot[j].ID {
+			return snapshot[i].Name < snapshot[j].Name
+		}
+		return snapshot[i].ID < snapshot[j].ID
+	})
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return ""
+	}
+	sum := sha1.Sum(data)
+	return fmt.Sprintf("%x", sum[:])
 }
 
 func collectUpdateStatus() *OpenClawUpdate {
@@ -433,23 +516,8 @@ func parseOpenClawStatusAll(out string) (*OpenClawInfo, error) {
 		info.Channels = append(info.Channels, ch)
 	}
 
-	// Agents 表：Agent | Bootstrap file | Sessions | Active | Store
-	agentRows := parseTable(lines, "Agents", []string{"Agent", "Bootstrap file", "Sessions", "Active", "Store"})
-	for _, row := range agentRows {
-		agentStr := strings.TrimSpace(row["Agent"])
-		if agentStr == "" {
-			continue
-		}
-		id, name := parseAgentIDAndName(agentStr)
-		sessions := parseInt(row["Sessions"], 0)
-		info.Agents = append(info.Agents, OpenClawAgent{
-			ID:        id,
-			Name:      name,
-			Sessions:  sessions,
-			Active:    strings.TrimSpace(row["Active"]),
-			Bootstrap: strings.TrimSpace(row["Bootstrap file"]),
-		})
-	}
+	// Agents 表：兼容 Bootstrap/Bootstrap file、Active 等表头变体
+	info.Agents = parseAgentsTable(lines)
 	if len(info.Agents) == 0 {
 		info.Agents = parseAgentsLoose(lines)
 	}
@@ -618,13 +686,13 @@ func parseAgentsLoose(lines []string) []OpenClawAgent {
 		sessions := 0
 		active := ""
 		if offset+1 < len(cols) {
-			bootstrap = strings.TrimSpace(cols[offset+1])
+			bootstrap = normalizeAgentBootstrap(cols[offset+1])
 		}
 		if offset+2 < len(cols) {
 			sessions = parseInt(cols[offset+2], 0)
 		}
 		if offset+3 < len(cols) {
-			active = strings.TrimSpace(cols[offset+3])
+			active = normalizeAgentActive(cols[offset+3])
 		}
 		agents = append(agents, OpenClawAgent{
 			ID:        id,
@@ -633,6 +701,92 @@ func parseAgentsLoose(lines []string) []OpenClawAgent {
 			Active:    active,
 			Bootstrap: bootstrap,
 		})
+	}
+	if len(agents) == 0 {
+		return nil
+	}
+	return agents
+}
+
+func parseAgentsTable(lines []string) []OpenClawAgent {
+	start := findSectionStart(lines, "Agents")
+	if start < 0 {
+		return nil
+	}
+
+	headerIdx := -1
+	var headerCols []string
+	for i := start; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if line == "" || isTableSeparator(line) {
+			continue
+		}
+		if isNextSection(lines[i]) && i != start {
+			return nil
+		}
+		cols := splitTableRow(lines[i])
+		if isAgentHeaderRow(cols) {
+			headerIdx = i
+			headerCols = cols
+			break
+		}
+	}
+	if headerIdx < 0 {
+		return nil
+	}
+
+	colIndex := func(names ...string) int {
+		for idx, col := range headerCols {
+			lower := strings.ToLower(strings.TrimSpace(col))
+			for _, name := range names {
+				if lower == name {
+					return idx
+				}
+			}
+		}
+		return -1
+	}
+
+	agentCol := colIndex("agent", "agents")
+	bootstrapCol := colIndex("bootstrap file", "bootstrap")
+	sessionsCol := colIndex("sessions", "session")
+	activeCol := colIndex("active", "activity", "last active")
+	if agentCol < 0 {
+		return nil
+	}
+
+	var agents []OpenClawAgent
+	for i := headerIdx + 1; i < len(lines); i++ {
+		line := lines[i]
+		if strings.TrimSpace(line) == "" || isTableSeparator(line) {
+			continue
+		}
+		if isNextSection(line) {
+			break
+		}
+		cols := splitTableRow(line)
+		if agentCol >= len(cols) {
+			continue
+		}
+		agentCell := strings.TrimSpace(cols[agentCol])
+		if agentCell == "" {
+			continue
+		}
+		id, name := parseAgentIDAndName(agentCell)
+		agent := OpenClawAgent{
+			ID:   id,
+			Name: name,
+		}
+		if bootstrapCol >= 0 && bootstrapCol < len(cols) {
+			agent.Bootstrap = normalizeAgentBootstrap(cols[bootstrapCol])
+		}
+		if sessionsCol >= 0 && sessionsCol < len(cols) {
+			agent.Sessions = parseInt(cols[sessionsCol], 0)
+		}
+		if activeCol >= 0 && activeCol < len(cols) {
+			agent.Active = normalizeAgentActive(cols[activeCol])
+		}
+		agents = append(agents, agent)
 	}
 	if len(agents) == 0 {
 		return nil
@@ -841,4 +995,64 @@ func parseInt(s string, defaultVal int) int {
 		return defaultVal
 	}
 	return n
+}
+
+func parseSessionsValue(v interface{}) int {
+	switch val := v.(type) {
+	case float64:
+		return int(val)
+	case int:
+		return val
+	case string:
+		return parseInt(val, 0)
+	default:
+		return 0
+	}
+}
+
+func normalizeAgentActive(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+
+	lower := strings.ToLower(value)
+	switch lower {
+	case "-", "—", "n/a", "na", "none", "null", "offline", "inactive", "unknown":
+		return ""
+	case "just now", "now":
+		return "now"
+	}
+
+	lower = strings.TrimSuffix(lower, " ago")
+	lower = strings.Join(strings.Fields(lower), " ")
+
+	if matched, _ := regexp.MatchString(`^\d+[smhdw]$`, lower); matched {
+		return lower
+	}
+	if matched, _ := regexp.MatchString(`^\d+\s*[smhdw]$`, lower); matched {
+		return strings.ReplaceAll(lower, " ", "")
+	}
+	return lower
+}
+
+func normalizeAgentBootstrap(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	lower := strings.ToLower(value)
+	switch lower {
+	case "-", "—", "n/a", "na", "none", "null", "default", "unknown":
+		return ""
+	}
+
+	value = strings.Trim(value, "\"'")
+	if strings.Contains(value, "/") || strings.Contains(value, "\\") {
+		base := filepath.Base(value)
+		if base != "." && base != "/" && base != "" {
+			return base
+		}
+	}
+	return value
 }

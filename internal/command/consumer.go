@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"monitor-agent/internal/openclawstate"
 	"monitor-agent/internal/transport"
 	"monitor-agent/pkg/crypto"
 	"monitor-agent/pkg/logger"
@@ -101,6 +102,9 @@ func (c *Consumer) handleCommand(ctx context.Context, cmd *transport.Command) {
 
 	c.reportResult(cmd.ID, 1, "", "")
 	c.sendProgress(cmd.ID, "running", 0, "开始执行", 1, 0)
+	if cmdType == TypeMessage {
+		openclawstate.MarkMessageActivity()
+	}
 
 	result := Execute(cmdType, cmdParams)
 
