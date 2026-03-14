@@ -234,7 +234,7 @@ func execConfig(params map[string]interface{}) *Result {
 func runCLI(timeout time.Duration, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, openclawcli.BinaryPath(), args...)
+	cmd := openclawcli.CommandContext(ctx, args...)
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
