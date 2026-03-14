@@ -48,11 +48,13 @@ type OpenClawOverview struct {
 }
 
 type OpenClawAgent struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Sessions  int    `json:"sessions,omitempty"`
-	Active    string `json:"active,omitempty"`
-	Bootstrap string `json:"bootstrap,omitempty"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Sessions      int    `json:"sessions,omitempty"`
+	Active        string `json:"active,omitempty"`
+	Bootstrap     string `json:"bootstrap,omitempty"`
+	SessionModel  string `json:"session_model,omitempty"`
+	SessionTokens string `json:"session_tokens,omitempty"`
 }
 
 type OpenClawChannel struct {
@@ -521,6 +523,7 @@ func parseOpenClawStatusAll(out string) (*OpenClawInfo, error) {
 	if len(info.Agents) == 0 {
 		info.Agents = parseAgentsLoose(lines)
 	}
+	annotateAgentsWithSessions(lines, info.Agents)
 
 	// Diagnosis：Skills: N eligible · M missing
 	if d := parseDiagnosis(lines); d != nil {
@@ -528,6 +531,52 @@ func parseOpenClawStatusAll(out string) (*OpenClawInfo, error) {
 	}
 
 	return info, nil
+}
+
+type openClawSessionSnapshot struct {
+	AgentID string
+	Key     string
+	Model   string
+	Tokens  string
+}
+
+func annotateAgentsWithSessions(lines []string, agents []OpenClawAgent) {
+	if len(agents) == 0 {
+		return
+	}
+	sessions := parseSessionsTable(lines)
+	if len(sessions) == 0 {
+		return
+	}
+
+	bestByAgent := make(map[string]openClawSessionSnapshot, len(sessions))
+	for _, session := range sessions {
+		if session.AgentID == "" {
+			continue
+		}
+		existing, ok := bestByAgent[session.AgentID]
+		if !ok || preferSessionSnapshot(session, existing) {
+			bestByAgent[session.AgentID] = session
+		}
+	}
+
+	for i := range agents {
+		s, ok := bestByAgent[agents[i].ID]
+		if !ok {
+			continue
+		}
+		agents[i].SessionModel = strings.TrimSpace(s.Model)
+		agents[i].SessionTokens = strings.TrimSpace(s.Tokens)
+	}
+}
+
+func preferSessionSnapshot(candidate, existing openClawSessionSnapshot) bool {
+	candidateMain := strings.HasSuffix(candidate.Key, ":main")
+	existingMain := strings.HasSuffix(existing.Key, ":main")
+	if candidateMain != existingMain {
+		return candidateMain
+	}
+	return existing.Key == ""
 }
 
 // parseOverviewTable 解析 Overview 这样的 Key-Value 表，返回 overview 结构
@@ -792,6 +841,54 @@ func parseAgentsTable(lines []string) []OpenClawAgent {
 		return nil
 	}
 	return agents
+}
+
+func parseSessionsTable(lines []string) []openClawSessionSnapshot {
+	rows := parseTable(lines, "Sessions", []string{"Key", "Kind", "Age", "Model", "Tokens"})
+	if len(rows) == 0 {
+		return nil
+	}
+
+	var sessions []openClawSessionSnapshot
+	for _, row := range rows {
+		key := strings.TrimSpace(row["Key"])
+		agentID := parseAgentIDFromSessionKey(key)
+		if agentID == "" {
+			continue
+		}
+		sessions = append(sessions, openClawSessionSnapshot{
+			AgentID: agentID,
+			Key:     key,
+			Model:   strings.TrimSpace(row["Model"]),
+			Tokens:  normalizeSessionTokens(row["Tokens"]),
+		})
+	}
+	return sessions
+}
+
+func parseAgentIDFromSessionKey(key string) string {
+	key = strings.TrimSpace(key)
+	if !strings.HasPrefix(key, "agent:") {
+		return ""
+	}
+	rest := strings.TrimPrefix(key, "agent:")
+	parts := strings.Split(rest, ":")
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(parts[0])
+}
+
+func normalizeSessionTokens(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = strings.Join(strings.Fields(value), " ")
+	if lower := strings.ToLower(value); lower == "unknown" || strings.HasPrefix(lower, "unknown/") {
+		return ""
+	}
+	return value
 }
 
 func isAgentHeaderRow(cols []string) bool {
