@@ -18,6 +18,7 @@ const (
 	TypeStop     = "openclaw_stop"
 	TypeRestart  = "openclaw_restart"
 	TypeStatus   = "openclaw_status"
+	TypeAgents   = "openclaw_agents"
 	TypeConfig   = "openclaw_config"
 	TypeDoctor   = "openclaw_doctor"
 	TypeUpdate   = "openclaw_update"
@@ -54,6 +55,8 @@ func Execute(commandType string, params map[string]interface{}) *Result {
 		result = execRestart()
 	case TypeStatus:
 		result = execStatus()
+	case TypeAgents:
+		result = execAgents()
 	case TypeConfig:
 		result = execConfig(params)
 	case TypeDoctor:
@@ -239,6 +242,14 @@ func execDoctor() *Result {
 	out, err := runCLI(defaultTimeout, "doctor")
 	if err != nil && out == "" {
 		return &Result{Status: 3, ErrorMessage: fmt.Sprintf("openclaw doctor failed: %v", err)}
+	}
+	return &Result{Status: 2, Output: out}
+}
+
+func execAgents() *Result {
+	out, err := runCLI(15*time.Second, "agents", "list", "--json")
+	if err != nil && out == "" {
+		return &Result{Status: 3, ErrorMessage: fmt.Sprintf("openclaw agents list failed: %v", err)}
 	}
 	return &Result{Status: 2, Output: out}
 }
