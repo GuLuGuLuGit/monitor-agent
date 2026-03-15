@@ -14,8 +14,8 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 	"monitor-agent/internal/cache"
-	"monitor-agent/internal/command"
 	"monitor-agent/internal/collector"
+	"monitor-agent/internal/command"
 	"monitor-agent/internal/config"
 	"monitor-agent/internal/device"
 	"monitor-agent/internal/identity"
@@ -74,18 +74,24 @@ func main() {
 
 	// 设备 ID（使用 Node ID 作为 Device ID）
 	deviceID := nodeIdentity.NodeID
+	deviceInfo, err := device.Collect(deviceID)
+	if err != nil {
+		logger.Warn("collect device info failed", "err", err)
+	}
 
 	// 认证：加载已有 API Key 或走配对码注册
 	apiKey, _ := device.LoadAPIKey(cfg.Device.APIKeyFile)
 	if apiKey == "" {
 		// 尝试配对码注册
-		info, err := device.Collect(deviceID)
-		if err != nil {
+		if deviceInfo == nil {
+			deviceInfo, err = device.Collect(deviceID)
+		}
+		if err != nil || deviceInfo == nil {
 			logger.Error("collect device info", "err", err)
 			os.Exit(1)
 		}
 
-		apiKey, err = pairing.RunPairing(cli, nodeIdentity, info.Hostname, info.OSVersion)
+		apiKey, err = pairing.RunPairing(cli, nodeIdentity, deviceInfo.Hostname, deviceInfo.OSVersion)
 		if err != nil {
 			logger.Error("pairing failed", "err", err)
 			os.Exit(1)
@@ -326,7 +332,7 @@ func main() {
 						}
 					}
 				}
-				_, err := up.Heartbeat(device.AgentVersion, 1, extraData)
+				_, err := up.Heartbeat(deviceInfo, device.AgentVersion, 1, extraData)
 				if err != nil {
 					logger.Warn("heartbeat failed", "err", err)
 					if c != nil {

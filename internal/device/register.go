@@ -24,6 +24,10 @@ type RegisterResponse struct {
 type HeartbeatRequest struct {
 	AgentVersion string  `json:"agent_version"`
 	Status       int8    `json:"status"`
+	CPUModel     string  `json:"cpu_model,omitempty"`
+	CPUCores     int     `json:"cpu_cores,omitempty"`
+	MemoryTotal  int64   `json:"memory_total,omitempty"`
+	DiskTotal    int64   `json:"disk_total,omitempty"`
 	ExtraData    *string `json:"extra_data,omitempty"`
 }
 

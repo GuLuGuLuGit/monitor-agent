@@ -43,11 +43,17 @@ func (u *Uploader) Register(info *device.Info) (*device.RegisterResponse, error)
 }
 
 // Heartbeat 心跳；extraData 为可选的 JSON 扩展数据
-func (u *Uploader) Heartbeat(agentVersion string, status int8, extraData *string) (*device.HeartbeatResponse, error) {
+func (u *Uploader) Heartbeat(info *device.Info, agentVersion string, status int8, extraData *string) (*device.HeartbeatResponse, error) {
 	req := device.HeartbeatRequest{
 		AgentVersion: agentVersion,
 		Status:       status,
 		ExtraData:    extraData,
+	}
+	if info != nil {
+		req.CPUModel = info.CPUModel
+		req.CPUCores = info.CPUCores
+		req.MemoryTotal = info.MemoryTotal
+		req.DiskTotal = info.DiskTotal
 	}
 	var resp device.HeartbeatResponse
 	if err := u.client.Post(heartbeatPath, req, &resp); err != nil {
@@ -82,7 +88,7 @@ func (u *Uploader) UploadSkills(skills []collector.SkillItem) error {
 		return nil
 	}
 	req := struct {
-		ScanTime time.Time           `json:"scan_time"`
+		ScanTime time.Time             `json:"scan_time"`
 		Skills   []collector.SkillItem `json:"skills"`
 	}{
 		ScanTime: time.Now().UTC(),
