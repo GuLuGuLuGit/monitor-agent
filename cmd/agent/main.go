@@ -512,9 +512,26 @@ func runPairingCodeCommand(args []string) error {
 	}
 
 	cli := client.New(cfg.Server.URL, cfg.Server.Timeout, retryConfig(cfg))
-	codeInfo, err := pairing.RequestPairingCode(cli, nodeIdentity, deviceInfo.Hostname, deviceInfo.OSVersion)
+	statusInfo, err := pairing.GetPairingStatus(cli, nodeIdentity.NodeID)
 	if err != nil {
-		return err
+		statusInfo = nil
+	}
+
+	var codeInfo *pairing.PairingCodeInfo
+	if statusInfo != nil && statusInfo.Status == "pending" && statusInfo.PairingCode != "" && statusInfo.ExpiresIn > 0 {
+		codeInfo = &pairing.PairingCodeInfo{
+			NodeID:      nodeIdentity.NodeID,
+			Hostname:    deviceInfo.Hostname,
+			PairingCode: statusInfo.PairingCode,
+			ExpiresIn:   statusInfo.ExpiresIn,
+			ExpiresAt:   statusInfo.ExpiresAt,
+			Status:      statusInfo.Status,
+		}
+	} else {
+		codeInfo, err = pairing.RequestPairingCode(cli, nodeIdentity, deviceInfo.Hostname, deviceInfo.OSVersion)
+		if err != nil {
+			return err
+		}
 	}
 
 	if *jsonOutput {
