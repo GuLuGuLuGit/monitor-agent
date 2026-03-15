@@ -502,7 +502,10 @@ func runPairingCodeCommand(args []string) error {
 				"node_id": nodeIdentity.NodeID,
 			})
 		}
-		fmt.Println("设备已绑定，无需配对码。")
+		fmt.Println("==================================================")
+		fmt.Println("设备已绑定")
+		fmt.Println("==================================================")
+		fmt.Println("这台设备已经完成绑定，无需再次使用配对码。")
 		return nil
 	}
 
@@ -538,10 +541,27 @@ func runPairingCodeCommand(args []string) error {
 		return printJSON(codeInfo)
 	}
 
-	fmt.Printf("配对码: %s\n", codeInfo.PairingCode)
-	fmt.Printf("设备名: %s\n", deviceInfo.Hostname)
-	fmt.Printf("有效期: %d 秒\n", codeInfo.ExpiresIn)
-	fmt.Println("请在 Web/App 中输入此配对码完成绑定。")
+	fmt.Println("==================================================")
+	fmt.Println("当前配对码")
+	fmt.Println("==================================================")
+	fmt.Printf("设备:         %s\n", deviceInfo.Hostname)
+	fmt.Println("")
+	fmt.Println("******************** 配对码 ********************")
+	fmt.Printf("                 %s\n", codeInfo.PairingCode)
+	fmt.Println("************************************************")
+	if codeInfo.ExpiresIn > 0 {
+		minutes := codeInfo.ExpiresIn / 60
+		if minutes < 1 {
+			minutes = 1
+		}
+		fmt.Printf("有效期:       %d 分钟\n", minutes)
+	}
+	fmt.Println("")
+	fmt.Println("使用方法:")
+	fmt.Println("1. 打开 Web 或 App")
+	fmt.Println("2. 进入“添加设备”页面")
+	fmt.Println("3. 输入上面的配对码")
+	fmt.Println("4. 绑定成功后，即可管理这台设备")
 	return nil
 }
 
