@@ -28,19 +28,40 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "", "config file path")
-	showInfo := flag.Bool("info", false, "show node identity and exit")
-	flag.Parse()
-
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		panic("load config: " + err.Error())
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "pairing-code":
+			if err := runPairingCodeCommand(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		case "status":
+			if err := runStatusCommand(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		}
 	}
 
-	// Identity: load or create Node ID + RSA key pair
-	nodeIdentity, err := identity.LoadOrCreate(cfg.Device.DataDir)
+	if err := runAgent(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func runAgent(args []string) error {
+	fs := flag.NewFlagSet("monitor-agent", flag.ContinueOnError)
+	configPath := fs.String("config", "", "config file path")
+	showInfo := fs.Bool("info", false, "show node identity and exit")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	cfg, nodeIdentity, err := loadRuntime(*configPath)
 	if err != nil {
-		panic("init identity: " + err.Error())
+		return err
 	}
 
 	if *showInfo {
@@ -49,11 +70,11 @@ func main() {
 		fmt.Printf("Key Storage:  %s\n", nodeIdentity.StorageType())
 		fmt.Printf("Public Key:   %s (SHA-256)\n", fp)
 		fmt.Printf("Data Dir:     %s\n", cfg.Device.DataDir)
-		os.Exit(0)
+		return nil
 	}
 
 	if err := logger.Init(cfg.Logs.Level, cfg.Logs.File, cfg.Logs.MaxSize, cfg.Logs.MaxBackups); err != nil {
-		panic("init logger: " + err.Error())
+		return fmt.Errorf("init logger: %w", err)
 	}
 	defer logger.Sync()
 
@@ -63,49 +84,40 @@ func main() {
 		"node_id", nodeIdentity.NodeID,
 		"key_storage", nodeIdentity.StorageType())
 
-	// HTTP 客户端
-	retry := client.RetryConfig{
-		MaxAttempts:     cfg.Retry.MaxAttempts,
-		InitialInterval: time.Duration(cfg.Retry.InitialInterval) * time.Second,
-		MaxInterval:     time.Duration(cfg.Retry.MaxInterval) * time.Second,
-	}
+	retry := retryConfig(cfg)
 	cli := client.New(cfg.Server.URL, cfg.Server.Timeout, retry)
 	up := uploader.New(cli)
 
-	// 设备 ID（使用 Node ID 作为 Device ID）
 	deviceID := nodeIdentity.NodeID
 	deviceInfo, err := device.Collect(deviceID)
 	if err != nil {
 		logger.Warn("collect device info failed", "err", err)
 	}
 
-	// 认证：加载已有 API Key 或走配对码注册
 	apiKey, _ := device.LoadAPIKey(cfg.Device.APIKeyFile)
 	if apiKey == "" {
-		// 尝试配对码注册
 		if deviceInfo == nil {
 			deviceInfo, err = device.Collect(deviceID)
 		}
 		if err != nil || deviceInfo == nil {
 			logger.Error("collect device info", "err", err)
-			os.Exit(1)
+			return fmt.Errorf("collect device info: %w", err)
 		}
 
 		apiKey, err = pairing.RunPairing(cli, nodeIdentity, deviceInfo.Hostname, deviceInfo.OSVersion)
 		if err != nil {
 			logger.Error("pairing failed", "err", err)
-			os.Exit(1)
+			return fmt.Errorf("pairing failed: %w", err)
 		}
 
 		if err := device.StoreAPIKey(cfg.Device.APIKeyFile, apiKey); err != nil {
 			logger.Error("store api key", "err", err)
-			os.Exit(1)
+			return fmt.Errorf("store api key: %w", err)
 		}
 		logger.Info("device registered", "device_id", deviceID)
 	}
 	cli.SetAPIKey(apiKey)
 
-	// 命令通道 + 结果上报
 	var cmdBroker transport.CommandBroker
 	var resultReporter transport.ResultReporter
 	var rdb *goredis.Client
@@ -153,7 +165,6 @@ func main() {
 		resultReporter = transport.NewHTTPResultReporter(cli)
 	}
 
-	// 离线缓存（可选）
 	var c *cache.Cache
 	if cfg.Cache.Dir != "" {
 		c, err = cache.New(cfg.Cache.Dir, cfg.Cache.MaxSizeMB)
@@ -169,7 +180,6 @@ func main() {
 
 	var wg sync.WaitGroup
 
-	// 缓存恢复上报（启动后延迟执行）
 	if c != nil {
 		wg.Add(1)
 		go func() {
@@ -180,12 +190,9 @@ func main() {
 			}()
 			defer wg.Done()
 
-			// 等待 10 秒，确保注册和认证完成
 			time.Sleep(10 * time.Second)
-
 			logger.Info("starting cache recovery")
 
-			// 恢复指标缓存
 			cachedMetrics, err := c.PopMetrics(100)
 			if err != nil {
 				logger.Warn("pop cached metrics failed", "err", err)
@@ -203,7 +210,6 @@ func main() {
 				if len(metrics) > 0 {
 					if err := up.UploadMetrics(metrics); err != nil {
 						logger.Warn("upload cached metrics failed", "err", err)
-						// 重新放回缓存
 						for i := range metrics {
 							_ = c.Push(cache.KindMetrics, metrics[i])
 						}
@@ -213,7 +219,6 @@ func main() {
 				}
 			}
 
-			// 恢复日志缓存
 			cachedLogs, err := c.PopLogs(100)
 			if err != nil {
 				logger.Warn("pop cached logs failed", "err", err)
@@ -232,7 +237,6 @@ func main() {
 					batchID := time.Now().UTC().Format("20060102-150405") + "-recovery"
 					if err := up.UploadLogs(batchID, logs); err != nil {
 						logger.Warn("upload cached logs failed", "err", err)
-						// 重新放回缓存
 						for _, le := range logs {
 							_ = c.Push(cache.KindLogs, le)
 						}
@@ -244,7 +248,6 @@ func main() {
 		}()
 	}
 
-	// 心跳：默认每 5 次携带一次 openclaw 扩展数据；当 agent 列表变化或最近有消息活动时更积极上报。
 	wg.Add(1)
 	go func() {
 		defer func() {
@@ -336,14 +339,13 @@ func main() {
 				if err != nil {
 					logger.Warn("heartbeat failed", "err", err)
 					if c != nil {
-						// 可选：标记离线，后续上报走缓存
+						// optional offline hint
 					}
 				}
 			}
 		}
 	}()
 
-	// 指标采集与上报
 	metricQueue := make([]collector.MetricItem, 0, cfg.Metrics.BatchSize*2)
 	wg.Add(1)
 	go func() {
@@ -384,7 +386,6 @@ func main() {
 		}
 	}()
 
-	// Skills 扫描与上报
 	wg.Add(1)
 	go func() {
 		defer func() {
@@ -411,7 +412,6 @@ func main() {
 		}
 	}()
 
-	// 日志上报
 	wg.Add(1)
 	go func() {
 		defer func() {
@@ -449,7 +449,6 @@ func main() {
 		}
 	}()
 
-	// 命令消费
 	if cmdBroker != nil {
 		wg.Add(1)
 		go func() {
@@ -470,7 +469,6 @@ func main() {
 		}()
 	}
 
-	// 优雅退出
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
@@ -481,4 +479,113 @@ func main() {
 		_ = rdb.Close()
 	}
 	logger.Info("exit")
+	return nil
+}
+
+func runPairingCodeCommand(args []string) error {
+	fs := flag.NewFlagSet("pairing-code", flag.ContinueOnError)
+	configPath := fs.String("config", "", "config file path")
+	jsonOutput := fs.Bool("json", false, "print machine-readable output")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	cfg, nodeIdentity, err := loadRuntime(*configPath)
+	if err != nil {
+		return err
+	}
+	apiKey, _ := device.LoadAPIKey(cfg.Device.APIKeyFile)
+	if apiKey != "" {
+		if *jsonOutput {
+			return printJSON(map[string]any{
+				"status":  "paired",
+				"node_id": nodeIdentity.NodeID,
+			})
+		}
+		fmt.Println("设备已绑定，无需配对码。")
+		return nil
+	}
+
+	deviceInfo, err := device.Collect(nodeIdentity.NodeID)
+	if err != nil {
+		return fmt.Errorf("collect device info: %w", err)
+	}
+
+	cli := client.New(cfg.Server.URL, cfg.Server.Timeout, retryConfig(cfg))
+	codeInfo, err := pairing.RequestPairingCode(cli, nodeIdentity, deviceInfo.Hostname, deviceInfo.OSVersion)
+	if err != nil {
+		return err
+	}
+
+	if *jsonOutput {
+		return printJSON(codeInfo)
+	}
+
+	fmt.Printf("配对码: %s\n", codeInfo.PairingCode)
+	fmt.Printf("设备名: %s\n", deviceInfo.Hostname)
+	fmt.Printf("有效期: %d 秒\n", codeInfo.ExpiresIn)
+	fmt.Println("请在 Web/App 中输入此配对码完成绑定。")
+	return nil
+}
+
+func runStatusCommand(args []string) error {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	configPath := fs.String("config", "", "config file path")
+	jsonOutput := fs.Bool("json", false, "print machine-readable output")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	cfg, nodeIdentity, err := loadRuntime(*configPath)
+	if err != nil {
+		return err
+	}
+	apiKey, _ := device.LoadAPIKey(cfg.Device.APIKeyFile)
+	status := "unpaired"
+	if apiKey != "" {
+		status = "paired"
+	}
+	payload := map[string]any{
+		"status":     status,
+		"node_id":    nodeIdentity.NodeID,
+		"server_url": cfg.Server.URL,
+		"data_dir":   cfg.Device.DataDir,
+	}
+	if *jsonOutput {
+		return printJSON(payload)
+	}
+	fmt.Printf("状态: %s\n", status)
+	fmt.Printf("Node ID: %s\n", nodeIdentity.NodeID)
+	fmt.Printf("Server: %s\n", cfg.Server.URL)
+	fmt.Printf("Data Dir: %s\n", cfg.Device.DataDir)
+	return nil
+}
+
+func loadRuntime(configPath string) (*config.Config, *identity.Identity, error) {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load config: %w", err)
+	}
+	nodeIdentity, err := identity.LoadOrCreate(cfg.Device.DataDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("init identity: %w", err)
+	}
+	return cfg, nodeIdentity, nil
+}
+
+func retryConfig(cfg *config.Config) client.RetryConfig {
+	return client.RetryConfig{
+		MaxAttempts:     cfg.Retry.MaxAttempts,
+		InitialInterval: time.Duration(cfg.Retry.InitialInterval) * time.Second,
+		MaxInterval:     time.Duration(cfg.Retry.MaxInterval) * time.Second,
+	}
+}
+
+func printJSON(v any) error {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(b))
+	return nil
 }

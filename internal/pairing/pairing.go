@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"monitor-agent/internal/identity"
-	agentCrypto "monitor-agent/pkg/crypto"
 	"monitor-agent/pkg/client"
+	agentCrypto "monitor-agent/pkg/crypto"
 	"monitor-agent/pkg/logger"
 )
 
@@ -35,25 +35,66 @@ type pairingStatusResp struct {
 	APIKeyEnvelope *agentCrypto.Envelope `json:"api_key_envelope"`
 }
 
+type PairingCodeInfo struct {
+	NodeID      string    `json:"node_id"`
+	Hostname    string    `json:"hostname,omitempty"`
+	PairingCode string    `json:"pairing_code"`
+	ExpiresIn   int       `json:"expires_in"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	Status      string    `json:"status"`
+}
+
+type PairingStatusInfo struct {
+	NodeID string `json:"node_id"`
+	Status string `json:"status"`
+}
+
+func RequestPairingCode(httpClient *client.Client, id *identity.Identity, hostname, osVersion string) (*PairingCodeInfo, error) {
+	pubPEM, err := id.PublicKeyPEM()
+	if err != nil {
+		return nil, fmt.Errorf("get public key PEM: %w", err)
+	}
+
+	req := pairingRequest{
+		NodeID:       id.NodeID,
+		PublicKeyPEM: pubPEM,
+		Hostname:     hostname,
+		OSVersion:    osVersion,
+	}
+	var resp pairingRequestResp
+	if err := httpClient.Post(requestPath, req, &resp); err != nil {
+		return nil, fmt.Errorf("request pairing code: %w", err)
+	}
+
+	return &PairingCodeInfo{
+		NodeID:      id.NodeID,
+		Hostname:    hostname,
+		PairingCode: resp.PairingCode,
+		ExpiresIn:   resp.ExpiresIn,
+		ExpiresAt:   time.Now().UTC().Add(time.Duration(resp.ExpiresIn) * time.Second),
+		Status:      "pending",
+	}, nil
+}
+
+func GetPairingStatus(httpClient *client.Client, nodeID string) (*PairingStatusInfo, error) {
+	var statusResp pairingStatusResp
+	statusURL := fmt.Sprintf("%s?node_id=%s", statusPath, nodeID)
+	if err := httpClient.Get(statusURL, &statusResp); err != nil {
+		return nil, fmt.Errorf("get pairing status: %w", err)
+	}
+	return &PairingStatusInfo{
+		NodeID: nodeID,
+		Status: statusResp.Status,
+	}, nil
+}
+
 // RunPairing executes the pairing flow: request code, display it, poll until
 // confirmed or expired. Returns the API key on success.
 func RunPairing(httpClient *client.Client, id *identity.Identity, hostname, osVersion string) (string, error) {
-	pubPEM, err := id.PublicKeyPEM()
-	if err != nil {
-		return "", fmt.Errorf("get public key PEM: %w", err)
-	}
-
 	for {
-		// 1. Request pairing code
-		req := pairingRequest{
-			NodeID:       id.NodeID,
-			PublicKeyPEM: pubPEM,
-			Hostname:     hostname,
-			OSVersion:    osVersion,
-		}
-		var resp pairingRequestResp
-		if err := httpClient.Post(requestPath, req, &resp); err != nil {
-			return "", fmt.Errorf("request pairing code: %w", err)
+		codeInfo, err := RequestPairingCode(httpClient, id, hostname, osVersion)
+		if err != nil {
+			return "", err
 		}
 
 		// 2. Display pairing code
@@ -62,18 +103,18 @@ func RunPairing(httpClient *client.Client, id *identity.Identity, hostname, osVe
 		fmt.Println("║          OpenClaw 设备配对                ║")
 		fmt.Println("╠═══════════════════════════════════════════╣")
 		fmt.Printf("║                                           ║\n")
-		fmt.Printf("║     配对码:  %s                       ║\n", resp.PairingCode)
+		fmt.Printf("║     配对码:  %s                       ║\n", codeInfo.PairingCode)
 		fmt.Printf("║                                           ║\n")
 		fmt.Printf("║     请在 Web 管理端输入此配对码            ║\n")
-		fmt.Printf("║     有效期: %d 秒                         ║\n", resp.ExpiresIn)
+		fmt.Printf("║     有效期: %d 秒                         ║\n", codeInfo.ExpiresIn)
 		fmt.Println("║                                           ║")
 		fmt.Println("╚═══════════════════════════════════════════╝")
 		fmt.Println()
 
-		logger.Info("pairing code displayed", "code", resp.PairingCode, "expires_in", resp.ExpiresIn)
+		logger.Info("pairing code displayed", "code", codeInfo.PairingCode, "expires_in", codeInfo.ExpiresIn)
 
 		// 3. Poll for confirmation
-		deadline := time.Now().Add(time.Duration(resp.ExpiresIn) * time.Second)
+		deadline := time.Now().Add(time.Duration(codeInfo.ExpiresIn) * time.Second)
 		for time.Now().Before(deadline) {
 			time.Sleep(pollInterval)
 
