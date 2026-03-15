@@ -3,9 +3,11 @@ package openclawcli
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 )
@@ -14,6 +16,8 @@ var (
 	openclawPath string
 	nodePath     string
 	resolveOnce  sync.Once
+	configPath   string
+	configOnce   sync.Once
 )
 
 func resolvePaths() {
@@ -72,6 +76,53 @@ func NodePath() string {
 	return nodePath
 }
 
+// ConfigPath discovers the active OpenClaw config file path without assuming a fixed location.
+func ConfigPath(ctx context.Context) string {
+	configOnce.Do(func() {
+		if v := strings.TrimSpace(os.Getenv("OPENCLAW_CONFIG_PATH")); v != "" {
+			configPath = expandUser(v)
+			return
+		}
+		if v := strings.TrimSpace(os.Getenv("OPENCLAW_CONFIG")); v != "" {
+			configPath = expandUser(v)
+			return
+		}
+
+		out := runStatusAll(ctx)
+		if out == "" {
+			return
+		}
+		re := regexp.MustCompile(`(?m)^│\s*Config\s*│\s*(.+?)\s*│\s*$`)
+		matches := re.FindStringSubmatch(out)
+		if len(matches) < 2 {
+			return
+		}
+		configPath = expandUser(strings.TrimSpace(matches[1]))
+	})
+	return configPath
+}
+
+func runStatusAll(ctx context.Context) string {
+	cmd := CommandContext(ctx, "status", "--all")
+	out, err := cmd.CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return ""
+	}
+	return string(out)
+}
+
+func expandUser(path string) string {
+	if path == "" {
+		return ""
+	}
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
+}
+
 // CommandContext builds an exec.Cmd that works both for native binaries and env-node scripts.
 func CommandContext(ctx context.Context, args ...string) *exec.Cmd {
 	bin := BinaryPath()
@@ -80,6 +131,11 @@ func CommandContext(ctx context.Context, args ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, NodePath(), append([]string{bin}, commandArgs...)...)
 	}
 	return exec.CommandContext(ctx, bin, commandArgs...)
+}
+
+func DebugSummary() string {
+	resolvePaths()
+	return fmt.Sprintf("openclaw=%s node=%s", openclawPath, nodePath)
 }
 
 func usesEnvNode(path string) bool {

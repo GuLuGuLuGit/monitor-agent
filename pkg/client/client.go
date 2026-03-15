@@ -27,6 +27,25 @@ type RetryConfig struct {
 }
 
 // APIResponse 后端统一响应
+type APIError struct {
+	Code    int
+	Message string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("api error code=%d message=%s", e.Code, e.Message)
+}
+
+func IsAPIErrorCode(err error, code int) bool {
+	if err == nil {
+		return false
+	}
+	if apiErr, ok := err.(*APIError); ok {
+		return apiErr.Code == code
+	}
+	return false
+}
+
 type APIResponse struct {
 	Code      int             `json:"code"`
 	Message   string          `json:"message"`
@@ -118,7 +137,7 @@ func (c *Client) Get(path string, dataDest interface{}) error {
 	}
 
 	if apiResp.Code != 0 {
-		return fmt.Errorf("api error code=%d message=%s", apiResp.Code, apiResp.Message)
+		return &APIError{Code: apiResp.Code, Message: apiResp.Message}
 	}
 
 	if dataDest != nil && len(apiResp.Data) > 0 {
@@ -166,7 +185,7 @@ func (c *Client) postOnce(path string, body interface{}, dataDest interface{}) e
 	}
 
 	if apiResp.Code != 0 {
-		return fmt.Errorf("api error code=%d message=%s", apiResp.Code, apiResp.Message)
+		return &APIError{Code: apiResp.Code, Message: apiResp.Message}
 	}
 
 	if dataDest != nil && len(apiResp.Data) > 0 {

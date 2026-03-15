@@ -106,6 +106,9 @@ func Load(configPath string) (*Config, error) {
 		v.AddConfigPath(".")
 		v.AddConfigPath("config")
 		v.AddConfigPath("/etc/monitor-agent")
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			v.AddConfigPath(filepath.Join(home, ".config", "monitor-agent"))
+		}
 		_ = v.ReadInConfig()
 	}
 
@@ -193,12 +196,12 @@ func (c *Config) applyDefaults() error {
 		c.Cache.MaxSizeMB = 50
 	}
 
-	// ~/.openclaw/ as the canonical data directory
+	// monitor-agent 使用独立数据目录，避免与 ~/.openclaw 主数据冲突。
 	home, _ := os.UserHomeDir()
 	if home == "" {
 		home = "."
 	}
-	dataDir := filepath.Join(home, ".openclaw")
+	dataDir := filepath.Join(home, ".local", "share", "monitor-agent", "data")
 	if c.Device.DataDir == "" {
 		c.Device.DataDir = dataDir
 	}
@@ -215,6 +218,18 @@ func (c *Config) applyDefaults() error {
 		c.Logs.File = filepath.Join(c.Device.DataDir, "logs", "agent.log")
 	}
 
+	if len(c.Skills.ScanPaths) == 0 {
+		c.Skills.ScanPaths = []string{
+			"~/.openclaw/skills",
+			"~/.local/share/openclaw/skills",
+			"~/Library/Application Support/OpenClaw/skills",
+			"/usr/local/openclaw/skills",
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv("OPENCLAW_SKILLS_PATHS")); raw != "" {
+		c.Skills.ScanPaths = splitPathList(raw)
+	}
+
 	// 展开 skills 路径中的 ~
 	for i, p := range c.Skills.ScanPaths {
 		if strings.HasPrefix(p, "~/") {
@@ -223,6 +238,20 @@ func (c *Config) applyDefaults() error {
 	}
 
 	return nil
+}
+
+func splitPathList(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';'
+	})
+	paths := make([]string, 0, len(fields))
+	for _, field := range fields {
+		trimmed := strings.TrimSpace(field)
+		if trimmed != "" {
+			paths = append(paths, trimmed)
+		}
+	}
+	return paths
 }
 
 // Validate 校验配置

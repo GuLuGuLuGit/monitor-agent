@@ -24,6 +24,7 @@ import (
 	"monitor-agent/internal/transport"
 	"monitor-agent/internal/uploader"
 	"monitor-agent/pkg/client"
+	agentCrypto "monitor-agent/pkg/crypto"
 	"monitor-agent/pkg/logger"
 )
 
@@ -117,6 +118,19 @@ func runAgent(args []string) error {
 		logger.Info("device registered", "device_id", deviceID)
 	}
 	cli.SetAPIKey(apiKey)
+
+	var revokeOnce sync.Once
+	handleCredentialRevoked := func(source error) {
+		revokeOnce.Do(func() {
+			logger.Warn("device credential revoked; clearing local api key and restarting for re-pair", "err", source)
+			if err := os.Remove(cfg.Device.APIKeyFile); err != nil && !os.IsNotExist(err) {
+				logger.Error("remove api key file", "err", err)
+			}
+			time.AfterFunc(1500*time.Millisecond, func() {
+				os.Exit(1)
+			})
+		})
+	}
 
 	var cmdBroker transport.CommandBroker
 	var resultReporter transport.ResultReporter
@@ -338,6 +352,9 @@ func runAgent(args []string) error {
 				_, err := up.Heartbeat(deviceInfo, device.AgentVersion, 1, extraData)
 				if err != nil {
 					logger.Warn("heartbeat failed", "err", err)
+					if client.IsAPIErrorCode(err, 40002) {
+						handleCredentialRevoked(err)
+					}
 					if c != nil {
 						// optional offline hint
 					}
@@ -347,6 +364,7 @@ func runAgent(args []string) error {
 	}()
 
 	metricQueue := make([]collector.MetricItem, 0, cfg.Metrics.BatchSize*2)
+	firstMetricsUploaded := false
 	wg.Add(1)
 	go func() {
 		defer func() {
@@ -371,7 +389,11 @@ func runAgent(args []string) error {
 					continue
 				}
 				metricQueue = append(metricQueue, *m)
-				if len(metricQueue) >= cfg.Metrics.BatchSize {
+				shouldUpload := len(metricQueue) >= cfg.Metrics.BatchSize
+				if !firstMetricsUploaded && len(metricQueue) > 0 {
+					shouldUpload = true
+				}
+				if shouldUpload {
 					if err := up.UploadMetrics(metricQueue); err != nil {
 						logger.Warn("upload metrics failed", "err", err)
 						if c != nil {
@@ -379,6 +401,8 @@ func runAgent(args []string) error {
 								_ = c.Push(cache.KindMetrics, metricQueue[i])
 							}
 						}
+					} else {
+						firstMetricsUploaded = true
 					}
 					metricQueue = metricQueue[:0]
 				}
@@ -518,6 +542,39 @@ func runPairingCodeCommand(args []string) error {
 	statusInfo, err := pairing.GetPairingStatus(cli, nodeIdentity.NodeID)
 	if err != nil {
 		statusInfo = nil
+	}
+
+	if statusInfo != nil && statusInfo.Status == "paired" {
+		if statusInfo.APIKeyEnvelope == nil {
+			return fmt.Errorf("device paired but api key envelope missing")
+		}
+		plaintext, err := agentCrypto.Open(nodeIdentity.PrivateKey, statusInfo.APIKeyEnvelope)
+		if err != nil {
+			return fmt.Errorf("decrypt api key envelope: %w", err)
+		}
+		var payload struct {
+			APIKey string `json:"api_key"`
+		}
+		if err := json.Unmarshal(plaintext, &payload); err != nil {
+			return fmt.Errorf("decode api key envelope: %w", err)
+		}
+		if payload.APIKey == "" {
+			return fmt.Errorf("device paired but api key missing")
+		}
+		if err := device.StoreAPIKey(cfg.Device.APIKeyFile, payload.APIKey); err != nil {
+			return fmt.Errorf("store api key: %w", err)
+		}
+		if *jsonOutput {
+			return printJSON(map[string]any{
+				"status":  "paired",
+				"node_id": nodeIdentity.NodeID,
+			})
+		}
+		fmt.Println("==================================================")
+		fmt.Println("设备已绑定")
+		fmt.Println("==================================================")
+		fmt.Println("这台设备已经完成绑定，无需再次使用配对码。")
+		return nil
 	}
 
 	var codeInfo *pairing.PairingCodeInfo

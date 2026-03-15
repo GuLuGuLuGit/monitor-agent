@@ -47,11 +47,12 @@ type PairingCodeInfo struct {
 }
 
 type PairingStatusInfo struct {
-	NodeID      string    `json:"node_id"`
-	Status      string    `json:"status"`
-	PairingCode string    `json:"pairing_code,omitempty"`
-	ExpiresIn   int       `json:"expires_in,omitempty"`
-	ExpiresAt   time.Time `json:"expires_at,omitempty"`
+	NodeID         string                `json:"node_id"`
+	Status         string                `json:"status"`
+	PairingCode    string                `json:"pairing_code,omitempty"`
+	ExpiresIn      int                   `json:"expires_in,omitempty"`
+	ExpiresAt      time.Time             `json:"expires_at,omitempty"`
+	APIKeyEnvelope *agentCrypto.Envelope `json:"api_key_envelope,omitempty"`
 }
 
 func RequestPairingCode(httpClient *client.Client, id *identity.Identity, hostname, osVersion string) (*PairingCodeInfo, error) {
@@ -88,11 +89,12 @@ func GetPairingStatus(httpClient *client.Client, nodeID string) (*PairingStatusI
 		return nil, fmt.Errorf("get pairing status: %w", err)
 	}
 	return &PairingStatusInfo{
-		NodeID:      nodeID,
-		Status:      statusResp.Status,
-		PairingCode: statusResp.PairingCode,
-		ExpiresIn:   statusResp.ExpiresIn,
-		ExpiresAt:   time.Now().UTC().Add(time.Duration(statusResp.ExpiresIn) * time.Second),
+		NodeID:         nodeID,
+		Status:         statusResp.Status,
+		PairingCode:    statusResp.PairingCode,
+		ExpiresIn:      statusResp.ExpiresIn,
+		ExpiresAt:      time.Now().UTC().Add(time.Duration(statusResp.ExpiresIn) * time.Second),
+		APIKeyEnvelope: statusResp.APIKeyEnvelope,
 	}, nil
 }
 

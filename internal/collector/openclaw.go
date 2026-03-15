@@ -546,6 +546,9 @@ func annotateAgentsWithSessions(lines []string, agents []OpenClawAgent) {
 	}
 	sessions := parseSessionsTable(lines)
 	if len(sessions) == 0 {
+		sessions = collectSessionsJSON()
+	}
+	if len(sessions) == 0 {
 		return
 	}
 
@@ -565,8 +568,12 @@ func annotateAgentsWithSessions(lines []string, agents []OpenClawAgent) {
 		if !ok {
 			continue
 		}
-		agents[i].SessionModel = strings.TrimSpace(s.Model)
-		agents[i].SessionTokens = strings.TrimSpace(s.Tokens)
+		if agents[i].SessionModel == "" {
+			agents[i].SessionModel = strings.TrimSpace(s.Model)
+		}
+		if agents[i].SessionTokens == "" {
+			agents[i].SessionTokens = strings.TrimSpace(s.Tokens)
+		}
 	}
 }
 
@@ -866,6 +873,46 @@ func parseSessionsTable(lines []string) []openClawSessionSnapshot {
 	return sessions
 }
 
+func collectSessionsJSON() []openClawSessionSnapshot {
+	out := runQuickCLI(10*time.Second, "sessions", "--all-agents", "--json")
+	if out == "" {
+		return nil
+	}
+	var payload struct {
+		Sessions []struct {
+			Key           string `json:"key"`
+			AgentID       string `json:"agentId"`
+			Model         string `json:"model"`
+			TotalTokens   int64  `json:"totalTokens"`
+			ContextTokens int64  `json:"contextTokens"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		return nil
+	}
+
+	sessions := make([]openClawSessionSnapshot, 0, len(payload.Sessions))
+	for _, item := range payload.Sessions {
+		agentID := strings.TrimSpace(item.AgentID)
+		if agentID == "" {
+			agentID = parseAgentIDFromSessionKey(item.Key)
+		}
+		if agentID == "" {
+			continue
+		}
+		sessions = append(sessions, openClawSessionSnapshot{
+			AgentID: agentID,
+			Key:     strings.TrimSpace(item.Key),
+			Model:   strings.TrimSpace(item.Model),
+			Tokens:  formatSessionTokens(item.TotalTokens, item.ContextTokens),
+		})
+	}
+	if len(sessions) == 0 {
+		return nil
+	}
+	return sessions
+}
+
 func parseAgentIDFromSessionKey(key string) string {
 	key = strings.TrimSpace(key)
 	if !strings.HasPrefix(key, "agent:") {
@@ -889,6 +936,33 @@ func normalizeSessionTokens(value string) string {
 		return ""
 	}
 	return value
+}
+
+func formatSessionTokens(total, context int64) string {
+	switch {
+	case total <= 0 && context <= 0:
+		return ""
+	case context > 0 && total > 0:
+		return fmt.Sprintf("%s / %s", formatCompactTokenCount(total), formatCompactTokenCount(context))
+	case total > 0:
+		return formatCompactTokenCount(total)
+	default:
+		return formatCompactTokenCount(context)
+	}
+}
+
+func formatCompactTokenCount(v int64) string {
+	if v >= 1_000_000 {
+		return fmt.Sprintf("%.1fm", float64(v)/1_000_000)
+	}
+	if v >= 1_000 {
+		f := float64(v) / 1_000
+		if v%1_000 == 0 {
+			return fmt.Sprintf("%dk", v/1_000)
+		}
+		return fmt.Sprintf("%.1fk", f)
+	}
+	return fmt.Sprintf("%d", v)
 }
 
 func isAgentHeaderRow(cols []string) bool {

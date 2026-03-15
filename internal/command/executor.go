@@ -161,8 +161,15 @@ func execStatus() *Result {
 }
 
 func execConfig(params map[string]interface{}) *Result {
-	home, _ := os.UserHomeDir()
-	configPath := filepath.Join(home, ".openclaw", "openclaw.json")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	configPath := openclawcli.ConfigPath(ctx)
+	if strings.TrimSpace(configPath) == "" {
+		return &Result{
+			Status:       3,
+			ErrorMessage: "unable to resolve OpenClaw config path",
+		}
+	}
 
 	action, _ := params["action"].(string)
 	if action == "" {
