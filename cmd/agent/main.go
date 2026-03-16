@@ -119,6 +119,12 @@ func runAgent(args []string) error {
 	}
 	cli.SetAPIKey(apiKey)
 
+	publicKeyPEM, pubErr := nodeIdentity.PublicKeyPEM()
+	if pubErr != nil {
+		logger.Warn("read public key pem failed", "err", pubErr)
+		publicKeyPEM = ""
+	}
+
 	var revokeOnce sync.Once
 	handleCredentialRevoked := func(source error) {
 		revokeOnce.Do(func() {
@@ -281,29 +287,48 @@ func runAgent(args []string) error {
 		var lastAgentsFingerprint string
 		var lastAgentsTriggeredAt time.Time
 		var lastMessageTriggeredAt time.Time
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				heartbeatCount++
-				var extraData *string
-				intervalDue := heartbeatCount%openclawInterval == 1
-				recentMessage := openclawstate.RecentMessageActivityWithin(recentMessageWindow)
-				currentAgentsFingerprint := collector.CollectAgentsFingerprint()
-				agentsChanged := currentAgentsFingerprint != "" && currentAgentsFingerprint != lastAgentsFingerprint
-				agentsDue := agentsChanged && (lastAgentsTriggeredAt.IsZero() || time.Since(lastAgentsTriggeredAt) >= agentsChangeCooldown)
-				messageDue := recentMessage && (lastMessageTriggeredAt.IsZero() || time.Since(lastMessageTriggeredAt) >= messageActivityCooldown)
-				shouldCollectExtra := intervalDue || agentsDue || messageDue
+		sendHeartbeat := func() {
+			heartbeatCount++
+			var extraData *string
+			intervalDue := heartbeatCount%openclawInterval == 1
+			recentMessage := openclawstate.RecentMessageActivityWithin(recentMessageWindow)
+			currentAgentsFingerprint := collector.CollectAgentsFingerprint()
+			agentsChanged := currentAgentsFingerprint != "" && currentAgentsFingerprint != lastAgentsFingerprint
+			agentsDue := agentsChanged && (lastAgentsTriggeredAt.IsZero() || time.Since(lastAgentsTriggeredAt) >= agentsChangeCooldown)
+			messageDue := recentMessage && (lastMessageTriggeredAt.IsZero() || time.Since(lastMessageTriggeredAt) >= messageActivityCooldown)
+			shouldCollectExtra := intervalDue || agentsDue || messageDue
 
-				if shouldCollectExtra {
-					if info, err := collector.CollectOpenClawInfo(); err == nil {
-						hasOverview := info.Overview != nil
-						hasDiagnosis := info.Diagnosis != nil
-						if !hasOverview || !hasDiagnosis {
-							logger.Info("openclaw parsed", "overview", hasOverview, "diagnosis", hasDiagnosis)
+			if shouldCollectExtra {
+				if info, err := collector.CollectOpenClawInfo(); err == nil {
+					hasOverview := info.Overview != nil
+					hasDiagnosis := info.Diagnosis != nil
+					if !hasOverview || !hasDiagnosis {
+						logger.Info("openclaw parsed", "overview", hasOverview, "diagnosis", hasDiagnosis)
+					}
+					if b, err := json.Marshal(info); err == nil {
+						sum := sha1.Sum(b)
+						currentHash := fmt.Sprintf("%x", sum[:])
+						if intervalDue || agentsDue || messageDue || currentHash != lastExtraHash {
+							s := string(b)
+							extraData = &s
+							lastExtraHash = currentHash
 						}
-						if b, err := json.Marshal(info); err == nil {
+						if fp := collector.AgentsFingerprint(info.Agents); fp != "" {
+							lastAgentsFingerprint = fp
+						} else if currentAgentsFingerprint != "" {
+							lastAgentsFingerprint = currentAgentsFingerprint
+						}
+						if agentsDue {
+							lastAgentsTriggeredAt = time.Now()
+						}
+						if messageDue {
+							lastMessageTriggeredAt = time.Now()
+						}
+					}
+				} else {
+					logger.Warn("collect openclaw info failed", "err", err)
+					if fallback := collector.CollectAgentsOnlyInfo(); fallback != nil {
+						if b, marshalErr := json.Marshal(fallback); marshalErr == nil {
 							sum := sha1.Sum(b)
 							currentHash := fmt.Sprintf("%x", sum[:])
 							if intervalDue || agentsDue || messageDue || currentHash != lastExtraHash {
@@ -311,7 +336,7 @@ func runAgent(args []string) error {
 								extraData = &s
 								lastExtraHash = currentHash
 							}
-							if fp := collector.AgentsFingerprint(info.Agents); fp != "" {
+							if fp := collector.AgentsFingerprint(fallback.Agents); fp != "" {
 								lastAgentsFingerprint = fp
 							} else if currentAgentsFingerprint != "" {
 								lastAgentsFingerprint = currentAgentsFingerprint
@@ -323,42 +348,28 @@ func runAgent(args []string) error {
 								lastMessageTriggeredAt = time.Now()
 							}
 						}
-					} else {
-						logger.Warn("collect openclaw info failed", "err", err)
-						if fallback := collector.CollectAgentsOnlyInfo(); fallback != nil {
-							if b, marshalErr := json.Marshal(fallback); marshalErr == nil {
-								sum := sha1.Sum(b)
-								currentHash := fmt.Sprintf("%x", sum[:])
-								if intervalDue || agentsDue || messageDue || currentHash != lastExtraHash {
-									s := string(b)
-									extraData = &s
-									lastExtraHash = currentHash
-								}
-								if fp := collector.AgentsFingerprint(fallback.Agents); fp != "" {
-									lastAgentsFingerprint = fp
-								} else if currentAgentsFingerprint != "" {
-									lastAgentsFingerprint = currentAgentsFingerprint
-								}
-								if agentsDue {
-									lastAgentsTriggeredAt = time.Now()
-								}
-								if messageDue {
-									lastMessageTriggeredAt = time.Now()
-								}
-							}
-						}
 					}
 				}
-				_, err := up.Heartbeat(deviceInfo, device.AgentVersion, 1, extraData)
-				if err != nil {
-					logger.Warn("heartbeat failed", "err", err)
-					if client.IsAPIErrorCode(err, 40002) {
-						handleCredentialRevoked(err)
-					}
-					if c != nil {
-						// optional offline hint
-					}
+			}
+			_, err := up.Heartbeat(deviceInfo, device.AgentVersion, 1, publicKeyPEM, extraData)
+			if err != nil {
+				logger.Warn("heartbeat failed", "err", err)
+				if client.IsAPIErrorCode(err, 40002) {
+					handleCredentialRevoked(err)
 				}
+				if c != nil {
+					// optional offline hint
+				}
+			}
+		}
+
+		sendHeartbeat()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sendHeartbeat()
 			}
 		}
 	}()

@@ -28,6 +28,7 @@ type HeartbeatRequest struct {
 	CPUCores     int     `json:"cpu_cores,omitempty"`
 	MemoryTotal  int64   `json:"memory_total,omitempty"`
 	DiskTotal    int64   `json:"disk_total,omitempty"`
+	PublicKeyPEM string  `json:"public_key_pem,omitempty"`
 	ExtraData    *string `json:"extra_data,omitempty"`
 }
 
