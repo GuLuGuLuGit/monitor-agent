@@ -509,6 +509,11 @@ func runAgent(args []string) error {
 	<-sigCh
 	logger.Info("shutting down")
 	cancel()
+	if cmdBroker != nil {
+		if err := cmdBroker.Close(); err != nil {
+			logger.Warn("close command broker failed", "err", err)
+		}
+	}
 	wg.Wait()
 	if rdb != nil {
 		_ = rdb.Close()
