@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/google/uuid"
 )
@@ -27,6 +28,12 @@ func LoadOrCreate(dataDir string) (*Identity, error) {
 	if err := os.MkdirAll(identityDir, 0700); err != nil {
 		return nil, fmt.Errorf("mkdir identity dir: %w", err)
 	}
+
+	unlock, err := lockIdentityDir(identityDir)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	store := newPlatformKeyStore(identityDir)
 
@@ -128,4 +135,20 @@ func (id *Identity) FingerprintStr() (string, error) {
 // StorageType returns where the private key is stored.
 func (id *Identity) StorageType() string {
 	return id.store.StorageType()
+}
+
+func lockIdentityDir(identityDir string) (func(), error) {
+	lockPath := filepath.Join(identityDir, ".lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("open identity lock: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("lock identity dir: %w", err)
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
 }
